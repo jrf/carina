@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Carina is a CLI reference/paper manager written in Rust. Think Papis, but faster, opinionated, and pleasant to use. The filesystem is the source of truth — each reference is a directory containing a PDF and an `info.toml` metadata file. SQLite (with FTS5) serves as a read cache/index, fully rebuildable from the filesystem at any time.
+Carina is a CLI reference/paper manager written in Rust. The filesystem is the source of truth — each reference is a directory containing a PDF and an `info.toml` metadata file. SQLite (with FTS5) serves as a read cache/index, fully rebuildable from the filesystem at any time.
 
 ## Build commands
 
