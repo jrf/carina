@@ -1356,48 +1356,83 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
     };
 
-    let left_chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(list_area);
+    let border_style = Style::default().fg(t.border);
 
-    // Filter / add input
-    if let Some(ref add_text) = app.add_input {
-        let add_prompt = " add: ";
-        let spans = vec![
-            Span::styled(add_prompt, s_warm),
+    // Build list block title from filter/add input
+    let list_title = if let Some(ref add_text) = app.add_input {
+        Line::from(vec![
+            Span::styled(" add: ", s_warm),
             Span::styled(add_text.as_str(), s_text),
-        ];
-        f.render_widget(Paragraph::new(Line::from(spans)), left_chunks[0]);
-        let cursor_x = left_chunks[0].x + add_prompt.len() as u16 + add_text.len() as u16;
-        f.set_cursor_position((cursor_x, left_chunks[0].y));
+        ])
     } else {
-        let prompt = " search: ";
-        let mut filter_spans = vec![Span::styled(prompt, s_muted)];
+        let mut spans = vec![Span::styled(" search: ", s_muted)];
         if let Some(ref tag) = app.tag_filter {
-            filter_spans.push(Span::styled(format!("[{}] ", tag), s_accent));
+            spans.push(Span::styled(format!("[{}] ", tag), s_accent));
         }
         if !app.filter.is_empty() {
-            filter_spans.push(Span::styled(&app.filter, s_text));
+            spans.push(Span::styled(&app.filter, s_text));
         }
-        f.render_widget(
-            Paragraph::new(Line::from(filter_spans)),
-            left_chunks[0],
-        );
+        Line::from(spans)
+    };
 
-        if app.input_mode == InputMode::Insert {
-            let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
-            let cursor_x = left_chunks[0].x + prompt.len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
-            let cursor_y = left_chunks[0].y;
-            f.set_cursor_position((cursor_x, cursor_y));
-        }
+    // Status bar as bottom title
+    let count_str = format!(" {}/{} ", app.filtered_indices.len(), app.entries.len());
+    let mode_indicator = match app.input_mode {
+        InputMode::Normal => Span::styled(
+            " NOR ",
+            Style::default().fg(t.status_fg).bg(t.normal_bg).add_modifier(Modifier::BOLD),
+        ),
+        InputMode::Insert => Span::styled(
+            " INS ",
+            Style::default().fg(t.status_fg).bg(t.insert_bg).add_modifier(Modifier::BOLD),
+        ),
+    };
+    let mode_hint = match (app.input_mode, &app.mode) {
+        (InputMode::Insert, _) => " esc normal ",
+        (InputMode::Normal, Mode::Browse) => " / search  c clear  q quit ",
+        (InputMode::Normal, Mode::Cite { .. }) => " / search  c clear  q quit ",
+    };
+    let mut bottom_spans = vec![
+        mode_indicator,
+        Span::styled(count_str, s_muted),
+    ];
+    if let Some(flash) = app.flash_message() {
+        bottom_spans.push(Span::styled(format!(" {} ", flash), s_warm));
+    } else {
+        bottom_spans.push(Span::styled(mode_hint, s_muted));
+    }
+    let bottom_left = Line::from(bottom_spans);
+
+    let sort_right = if app.sort_mode != SortMode::Name {
+        Line::from(Span::styled(format!(" sort: {} ", app.sort_mode.label()), s_warm))
+    } else {
+        Line::default()
+    };
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(list_title)
+        .title_bottom(bottom_left)
+        .title_bottom(sort_right.alignment(ratatui::layout::Alignment::Right));
+
+    let list_inner = list_block.inner(list_area);
+    f.render_widget(list_block, list_area);
+
+    // Cursor position for input
+    if app.add_input.is_some() {
+        let add_text = app.add_input.as_ref().unwrap();
+        let cursor_x = list_area.x + 1 + " add: ".len() as u16 + add_text.len() as u16;
+        f.set_cursor_position((cursor_x, list_area.y));
+    } else if app.input_mode == InputMode::Insert {
+        let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
+        let cursor_x = list_area.x + 1 + " search: ".len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
+        f.set_cursor_position((cursor_x, list_area.y));
     }
 
     // Paper list — year + author + title
-    app.list_height = left_chunks[1].height as usize;
-    let list_width = left_chunks[1].width as usize;
+    app.list_height = list_inner.height as usize;
+    let list_width = list_inner.width as usize;
     let prefix_width = 3 + 6 + 14; // highlight_symbol + year + author
     let title_max = list_width.saturating_sub(prefix_width);
 
@@ -1436,84 +1471,22 @@ fn draw(f: &mut Frame, app: &mut App) {
         .highlight_style(Style::default().bg(t.selection).add_modifier(Modifier::BOLD))
         .highlight_symbol(" > ");
 
-    f.render_stateful_widget(list, left_chunks[1], &mut app.list_state);
-
-    // Status bar
-    let count = format!("  {}/{}", app.filtered_indices.len(), app.entries.len());
-    let mode_indicator = match app.input_mode {
-        InputMode::Normal => Span::styled(
-            " NOR ",
-            Style::default().fg(t.status_fg).bg(t.normal_bg).add_modifier(Modifier::BOLD),
-        ),
-        InputMode::Insert => Span::styled(
-            " INS ",
-            Style::default().fg(t.status_fg).bg(t.insert_bg).add_modifier(Modifier::BOLD),
-        ),
-    };
-    let mode_hint = match (app.input_mode, &app.mode) {
-        (InputMode::Insert, _) => "  esc normal",
-        (InputMode::Normal, Mode::Browse) => "  / search  c clear  q quit",
-        (InputMode::Normal, Mode::Cite { .. }) => "  / search  c clear  q quit",
-    };
-    let left_status = if let Some(flash) = app.flash_message() {
-        Span::styled(format!("  {}", flash), s_warm)
-    } else {
-        Span::styled(mode_hint, s_muted)
-    };
-    let sort_indicator = if app.sort_mode != SortMode::Name {
-        format!("sort: {} ", app.sort_mode.label())
-    } else {
-        String::new()
-    };
-    let status_area = left_chunks[2];
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            mode_indicator,
-            Span::styled(count, s_muted),
-            left_status,
-        ])),
-        status_area,
-    );
-    if !sort_indicator.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(&sort_indicator, s_warm)))
-                .alignment(ratatui::layout::Alignment::Right),
-            status_area,
-        );
-    }
+    f.render_stateful_widget(list, list_inner, &mut app.list_state);
 
     // Preview pane
     if let Some(pane_area) = preview_area {
-        let (_sep_border, content_area) = if resolved == ResolvedLayout::Wide {
-            let inner = Layout::horizontal([
-                Constraint::Length(2),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(pane_area);
-            let sep = Block::default()
-                .borders(Borders::LEFT)
-                .border_style(Style::default().fg(t.border));
-            f.render_widget(sep, pane_area);
-            ((), inner[1])
-        } else {
-            let inner = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .split(pane_area);
-            let sep = Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(t.border));
-            f.render_widget(sep, inner[0]);
-            let content = Layout::horizontal([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(inner[1]);
-            ((), content[1])
-        };
+        let preview_title = app.selected_entry()
+            .map(|e| Line::from(Span::styled(format!(" {} ", e.dir_name), s_muted)))
+            .unwrap_or_default();
+
+        let preview_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(preview_title);
+
+        let content_area = preview_block.inner(pane_area);
+        f.render_widget(preview_block, pane_area);
+
         let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, accent: s_accent, warm: s_warm };
         draw_preview(f, app, content_area, &styles);
     }
