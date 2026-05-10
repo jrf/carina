@@ -93,7 +93,7 @@ pub fn cmd_add(library: &Path, input: &str) -> Result<()> {
     anyhow::bail!("Not a file, URL, arXiv ID, or DOI: {}", input)
 }
 
-fn index_reference(library: &Path, ref_dir: &Path, reference: &crate::model::Reference) {
+pub fn index_reference(library: &Path, ref_dir: &Path, reference: &crate::model::Reference) {
     if let Ok(idx) = index::Index::open(library) {
         let dir_name = ref_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
         let pdf_path = reference.files.first().map(|f| ref_dir.join(f));

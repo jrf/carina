@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -18,6 +19,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::{Frame, Terminal};
 
 use crate::config::Config as AppConfig;
+use crate::index;
 use crate::metadata;
 use crate::model::Reference;
 use crate::storage;
@@ -51,6 +53,21 @@ pub struct App {
     show_help: bool,
     list_height: usize,
     add_input: Option<String>,
+    enrich_preview: Option<EnrichPreview>,
+    enrich_rx: Option<mpsc::Receiver<Vec<EnrichItem>>>,
+}
+
+type FieldDiff = (String, String, String); // (field, old, new)
+type EnrichItem = (usize, Reference, Vec<FieldDiff>); // (entry idx, updated ref, diffs)
+
+struct EnrichPreview {
+    idx: usize,
+    updated: Reference,
+    diffs: Vec<FieldDiff>,
+    scroll: u16,
+    batch_queue: Vec<EnrichItem>,
+    applied: usize,
+    skipped: usize,
 }
 
 struct TagPopup {
@@ -298,13 +315,47 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
             return Ok(());
         }
 
-        let timeout = if app.flash.is_some() {
+        // Check for background enrich results
+        if let Some(ref rx) = app.enrich_rx {
+            match rx.try_recv() {
+                Ok(items) => {
+                    app.enrich_rx = None;
+                    if items.is_empty() {
+                        app.flash = Some(("Nothing to enrich".to_string(), std::time::Instant::now()));
+                    } else {
+                        let mut queue = items;
+                        let (idx, updated, diffs) = queue.remove(0);
+                        app.jump_to_entry(idx);
+                        app.enrich_preview = Some(EnrichPreview {
+                            idx,
+                            updated,
+                            diffs,
+                            scroll: 0,
+                            batch_queue: queue,
+                            applied: 0,
+                            skipped: 0,
+                        });
+                    }
+                    continue;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    app.enrich_rx = None;
+                    app.flash = Some(("Enrich failed".to_string(), std::time::Instant::now()));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        let timeout = if app.flash.is_some() || app.enrich_rx.is_some() {
             std::time::Duration::from_millis(100)
         } else {
             std::time::Duration::from_secs(60)
         };
         if !event::poll(timeout)? {
-            if app.flash_message().is_none() {
+            if app.enrich_rx.is_some() {
+                // Keep the flash alive while fetching
+                app.flash = Some(("Fetching...".to_string(), std::time::Instant::now()));
+            } else if app.flash_message().is_none() {
                 app.flash = None;
             }
             continue;
@@ -324,6 +375,32 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     }
                     KeyCode::Char(c) => {
                         if let Some(ref mut s) = app.add_input { s.push(c); }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            if app.enrich_preview.is_some() {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') => {
+                        app.apply_enrich();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('s') => {
+                        app.skip_enrich();
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.finish_enrich();
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if let Some(ref mut ep) = app.enrich_preview {
+                            ep.scroll = ep.scroll.saturating_add(1);
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if let Some(ref mut ep) = app.enrich_preview {
+                            ep.scroll = ep.scroll.saturating_sub(1);
+                        }
                     }
                     _ => {}
                 }
@@ -496,8 +573,17 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     (KeyCode::Char('a'), KeyModifiers::NONE) => {
                         app.add_input = Some(String::new());
                     }
+                    (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                        app.action_enrich_selected();
+                    }
+                    (KeyCode::Char('R'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        app.action_enrich_all();
+                    }
                     (KeyCode::Char('d'), KeyModifiers::NONE) => {
                         run_dedup(terminal, app)?;
+                    }
+                    (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        app.action_reindex();
                     }
 
                     (KeyCode::Char('J'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
@@ -582,6 +668,8 @@ impl App {
             show_help: false,
             list_height: 20,
             add_input: None,
+            enrich_preview: None,
+            enrich_rx: None,
         };
 
         if !app.filter.is_empty() {
@@ -877,6 +965,19 @@ impl App {
         }
     }
 
+    fn action_reindex(&mut self) {
+        let library = self.config.library_dir();
+        match index::Index::open(&library).and_then(|idx| idx.reindex(&library)) {
+            Ok(count) => {
+                self.reload_entries();
+                self.flash = Some((format!("Reindexed {} references", count), std::time::Instant::now()));
+            }
+            Err(e) => {
+                self.flash = Some((format!("Reindex error: {}", e), std::time::Instant::now()));
+            }
+        }
+    }
+
     fn reload_entries(&mut self) {
         let library = self.config.library_dir();
         let dirs = match storage::list_ref_dirs(&library) {
@@ -932,6 +1033,233 @@ impl App {
         let _ = std::process::Command::new("open").arg(&url).spawn();
         self.flash = Some(("Opened in browser".to_string(), std::time::Instant::now()));
     }
+
+    fn action_enrich_selected(&mut self) {
+        if self.enrich_rx.is_some() { return; }
+        let selected = match self.list_state.selected() {
+            Some(s) => s,
+            None => return,
+        };
+        let idx = self.filtered_indices[selected];
+        let dir = self.entries[idx].dir.clone();
+        let reference = self.entries[idx].reference.clone();
+
+        self.flash = Some(("Fetching...".to_string(), std::time::Instant::now()));
+        let (tx, rx) = mpsc::channel();
+        self.enrich_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = match enrich_entry(&dir, &reference) {
+                Ok(Some(updated)) => {
+                    let diffs = compute_diffs(&reference, &updated);
+                    if diffs.is_empty() { vec![] } else { vec![(idx, updated, diffs)] }
+                }
+                _ => vec![],
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    fn action_enrich_all(&mut self) {
+        if self.enrich_rx.is_some() { return; }
+
+        let work: Vec<(usize, PathBuf, Reference)> = self.entries.iter().enumerate()
+            .filter(|(_, e)| needs_enrich(&e.reference))
+            .map(|(i, e)| (i, e.dir.clone(), e.reference.clone()))
+            .collect();
+
+        if work.is_empty() {
+            self.flash = Some(("Nothing to enrich".to_string(), std::time::Instant::now()));
+            return;
+        }
+
+        self.flash = Some((format!("Fetching {} entries...", work.len()), std::time::Instant::now()));
+        let (tx, rx) = mpsc::channel();
+        self.enrich_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let mut items: Vec<EnrichItem> = Vec::new();
+            for (idx, dir, reference) in work {
+                if let Ok(Some(updated)) = enrich_entry(&dir, &reference) {
+                    let diffs = compute_diffs(&reference, &updated);
+                    if !diffs.is_empty() {
+                        items.push((idx, updated, diffs));
+                    }
+                }
+            }
+            let _ = tx.send(items);
+        });
+    }
+
+    fn apply_enrich(&mut self) {
+        let ep = match self.enrich_preview.take() {
+            Some(ep) => ep,
+            None => return,
+        };
+        let library = self.config.library_dir();
+        let _ = metadata::write_info(&self.entries[ep.idx].dir, &ep.updated);
+        crate::index_reference(&library, &self.entries[ep.idx].dir, &ep.updated);
+        self.update_entry_display(ep.idx, ep.updated);
+        let applied = ep.applied + 1;
+        self.advance_enrich_queue(ep.batch_queue, applied, ep.skipped);
+    }
+
+    fn skip_enrich(&mut self) {
+        let ep = match self.enrich_preview.take() {
+            Some(ep) => ep,
+            None => return,
+        };
+        let skipped = ep.skipped + 1;
+        self.advance_enrich_queue(ep.batch_queue, ep.applied, skipped);
+    }
+
+    fn finish_enrich(&mut self) {
+        let ep = match self.enrich_preview.take() {
+            Some(ep) => ep,
+            None => return,
+        };
+        if ep.applied > 0 || ep.skipped > 0 {
+            self.flash = Some((
+                format!("Enriched {}, skipped {}", ep.applied, ep.skipped + ep.batch_queue.len() + 1),
+                std::time::Instant::now(),
+            ));
+        }
+    }
+
+    fn advance_enrich_queue(
+        &mut self,
+        mut queue: Vec<EnrichItem>,
+        applied: usize,
+        skipped: usize,
+    ) {
+        if queue.is_empty() {
+            let msg = format!("Enriched {}, skipped {}", applied, skipped);
+            self.flash = Some((msg, std::time::Instant::now()));
+            return;
+        }
+        let (idx, updated, diffs) = queue.remove(0);
+        self.jump_to_entry(idx);
+        self.enrich_preview = Some(EnrichPreview {
+            idx,
+            updated,
+            diffs,
+            scroll: 0,
+            batch_queue: queue,
+            applied,
+            skipped,
+        });
+    }
+
+    fn jump_to_entry(&mut self, entry_idx: usize) {
+        if let Some(pos) = self.filtered_indices.iter().position(|&i| i == entry_idx) {
+            self.list_state.select(Some(pos));
+            self.preview_scroll = 0;
+        }
+    }
+
+    fn update_entry_display(&mut self, idx: usize, r: Reference) {
+        let authors = if r.authors.is_empty() {
+            String::new()
+        } else if r.authors.len() == 1 {
+            r.authors[0].clone()
+        } else {
+            format!("{} et al.", r.authors[0])
+        };
+        let year = r.year.map(|y| format!("({})", y)).unwrap_or_default();
+        let display = [authors, year, r.title.clone()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("  ");
+        self.entries[idx].reference = r;
+        self.entries[idx].display = display;
+    }
+}
+
+fn compute_diffs(old: &Reference, new: &Reference) -> Vec<(String, String, String)> {
+    let mut diffs = Vec::new();
+
+    if old.year != new.year {
+        let o = old.year.map(|y| y.to_string()).unwrap_or_default();
+        let n = new.year.map(|y| y.to_string()).unwrap_or_default();
+        diffs.push(("year".into(), o, n));
+    }
+    if old.authors != new.authors {
+        let o = if old.authors.is_empty() { String::new() } else { old.authors.join(", ") };
+        let n = new.authors.join(", ");
+        diffs.push(("authors".into(), o, n));
+    }
+    if old.doi != new.doi {
+        diffs.push(("doi".into(), old.doi.clone().unwrap_or_default(), new.doi.clone().unwrap_or_default()));
+    }
+    if old.arxiv != new.arxiv {
+        diffs.push(("arxiv".into(), old.arxiv.clone().unwrap_or_default(), new.arxiv.clone().unwrap_or_default()));
+    }
+    if old.journal != new.journal {
+        diffs.push(("journal".into(), old.journal.clone().unwrap_or_default(), new.journal.clone().unwrap_or_default()));
+    }
+    if old.r#abstract != new.r#abstract && old.r#abstract.is_none() {
+        diffs.push(("abstract".into(), String::new(), "(fetched)".into()));
+    }
+
+    diffs
+}
+
+fn needs_enrich(r: &Reference) -> bool {
+    r.year.is_none() || r.year == Some(0) || r.authors.is_empty()
+        || r.r#abstract.is_none() || r.doi.is_none()
+}
+
+fn enrich_entry(dir: &Path, r: &Reference) -> Result<Option<Reference>> {
+    use crate::fetch;
+
+    let arxiv_id = r.arxiv.clone().or_else(|| {
+        r.files.iter().find_map(|f| fetch::detect_arxiv_id(f))
+    });
+
+    let fetched = if let Some(ref id) = arxiv_id {
+        fetch::fetch_arxiv(id).ok()
+    } else if let Some(ref doi) = r.doi {
+        fetch::fetch_crossref(doi).ok()
+    } else {
+        // Try to detect arXiv ID from directory name
+        let dir_name = dir.file_name().unwrap_or_default().to_string_lossy();
+        if let Some(id) = fetch::detect_arxiv_id(&dir_name) {
+            fetch::fetch_arxiv(&id).ok()
+        } else if !r.title.is_empty() {
+            fetch::search_crossref_by_title(&r.title).ok()
+        } else {
+            return Ok(None);
+        }
+    };
+
+    let fetched = match fetched {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+
+    let mut updated = r.clone();
+
+    if updated.year.is_none() || updated.year == Some(0) {
+        updated.year = fetched.year;
+    }
+    if updated.authors.is_empty() {
+        updated.authors = fetched.authors;
+    }
+    if updated.r#abstract.is_none() {
+        updated.r#abstract = fetched.r#abstract;
+    }
+    if updated.doi.is_none() {
+        updated.doi = fetched.doi;
+    }
+    if updated.arxiv.is_none() {
+        updated.arxiv = fetched.arxiv;
+    }
+    if updated.journal.is_none() {
+        updated.journal = fetched.journal;
+    }
+
+    Ok(Some(updated))
 }
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -1238,6 +1566,77 @@ fn draw(f: &mut Frame, app: &mut App) {
         f.render_widget(Paragraph::new(hint), popup_chunks[1]);
     }
 
+    // Enrich preview popup
+    if let Some(ref ep) = app.enrich_preview {
+        let title_text = truncate_ellipsis(&app.entries[ep.idx].reference.title, 40);
+        let batch_info = if !ep.batch_queue.is_empty() || ep.applied > 0 || ep.skipped > 0 {
+            let remaining = ep.batch_queue.len() + 1;
+            let total = ep.applied + ep.skipped + remaining;
+            format!(" [{}/{}] ", ep.applied + ep.skipped + 1, total)
+        } else {
+            String::new()
+        };
+        let header = format!(" Enrich{}: {} ", batch_info, title_text);
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (field, old_val, new_val) in &ep.diffs {
+            lines.push(Line::from(Span::styled(
+                format!(" {}:", field),
+                s_accent.add_modifier(Modifier::BOLD),
+            )));
+            if !old_val.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("  - ", Style::default().fg(t.warm)),
+                    Span::styled(old_val.as_str(), s_dim),
+                ]));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("  + ", Style::default().fg(t.insert_bg)),
+                Span::styled(new_val.as_str(), s_text),
+            ]));
+        }
+
+        let content_height = lines.len() as u16;
+        let height = (content_height + 5).min(area.height.saturating_sub(4));
+        let width = 70.min(area.width.saturating_sub(4));
+        let x = area.width.saturating_sub(width) / 2;
+        let y = area.height.saturating_sub(height) / 2;
+        let popup_area = ratatui::layout::Rect::new(x, y, width, height);
+
+        f.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().bg(t.popup_bg))
+            .border_style(Style::default().fg(t.popup_border))
+            .title(header)
+            .title_style(s_accent.add_modifier(Modifier::BOLD));
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        let popup_chunks = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ]).split(inner);
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((ep.scroll, 0)),
+            popup_chunks[0],
+        );
+
+        let hint = Line::from(vec![
+            Span::styled(" enter/y", s_accent),
+            Span::styled("=apply  ", s_dim),
+            Span::styled("n/s", s_accent),
+            Span::styled("=skip  ", s_dim),
+            Span::styled("esc", s_accent),
+            Span::styled("=cancel", s_dim),
+        ]);
+        f.render_widget(Paragraph::new(hint), popup_chunks[1]);
+    }
+
     // Help popup
     if app.show_help {
         let help_lines = vec![
@@ -1253,7 +1652,10 @@ fn draw(f: &mut Frame, app: &mut App) {
             ("y", "Copy BibTeX"),
             ("o", "Open DOI / arXiv in browser"),
             ("a", "Add paper (path, DOI, arXiv, URL)"),
+            ("r", "Enrich selected (fetch metadata)"),
+            ("R", "Enrich all with missing fields"),
             ("d", "Deduplicate library"),
+            ("I", "Reindex library"),
             ("c", "Clear search and tag filter"),
             ("t", "Browse tags"),
             ("T", "Switch theme"),

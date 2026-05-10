@@ -3,6 +3,15 @@ use regex::Regex;
 
 use crate::model::Reference;
 
+fn clean_abstract(s: &str) -> String {
+    let tag_re = Regex::new(r"<[^>]+>").unwrap();
+    let s = tag_re.replace_all(s, "");
+    let s = Regex::new(r"(?i)^\s*abstract[.:]\s*")
+        .unwrap()
+        .replace(&s, "");
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn detect_arxiv_id(input: &str) -> Option<String> {
     let re = Regex::new(r"(?:arxiv\.org/(?:abs|pdf)/)?(\d{4}\.\d{4,5})(v\d+)?").unwrap();
     re.captures(input).map(|c| {
@@ -38,6 +47,54 @@ pub fn download_arxiv_pdf(arxiv_id: &str, dest: &std::path::Path) -> Result<()> 
 
     std::fs::write(dest, &bytes)?;
     Ok(())
+}
+
+pub fn search_crossref_by_title(title: &str) -> Result<Reference> {
+    let url = format!(
+        "https://api.crossref.org/works?query.title={}&rows=1",
+        urlencoding::encode(title)
+    );
+    let body = reqwest::blocking::Client::new()
+        .get(&url)
+        .header("User-Agent", "Carina/0.1 (reference manager; mailto:carina@example.com)")
+        .send()
+        .context("Failed to reach CrossRef API")?
+        .text()?;
+
+    let v: serde_json::Value = serde_json::from_str(&body).context("Invalid CrossRef JSON")?;
+    let items = v["message"]["items"].as_array().context("No results")?;
+    let item = items.first().context("No results")?;
+
+    let result_title = item["title"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    if !titles_match(title, result_title) {
+        anyhow::bail!("No matching result");
+    }
+
+    let doi = item["DOI"].as_str().context("No DOI in result")?;
+    fetch_crossref(doi)
+}
+
+fn titles_match(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let na = norm(a);
+    let nb = norm(b);
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
+    na == nb || na.starts_with(&nb) || nb.starts_with(&na)
 }
 
 pub fn fetch_crossref(doi: &str) -> Result<Reference> {
@@ -116,9 +173,7 @@ fn parse_arxiv_response(xml: &str, arxiv_id: &str) -> Result<Reference> {
     let title = title.context("No title found in arXiv response")?;
     let title = title.replace('\n', " ").split_whitespace().collect::<Vec<_>>().join(" ");
 
-    let abstract_text = abstract_text.map(|a| {
-        a.replace('\n', " ").split_whitespace().collect::<Vec<_>>().join(" ")
-    });
+    let abstract_text = abstract_text.map(|a| clean_abstract(&a));
 
     Ok(Reference {
         title,
@@ -177,14 +232,7 @@ fn parse_crossref_response(json: &str) -> Result<Reference> {
         .and_then(|t| t.as_str())
         .map(|s| s.to_string());
 
-    let abstract_text = msg["abstract"].as_str().map(|s| {
-        s.replace("<jats:p>", "")
-            .replace("</jats:p>", "")
-            .replace("<jats:italic>", "")
-            .replace("</jats:italic>", "")
-            .trim()
-            .to_string()
-    });
+    let abstract_text = msg["abstract"].as_str().map(|s| clean_abstract(s));
 
     Ok(Reference {
         title,
