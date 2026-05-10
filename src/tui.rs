@@ -25,6 +25,34 @@ use crate::model::Reference;
 use crate::storage;
 use crate::theme::{self, Theme};
 
+#[derive(Clone, Copy, PartialEq)]
+enum SortMode {
+    Name,
+    Author,
+    Year,
+    Title,
+}
+
+impl SortMode {
+    fn next(self) -> Self {
+        match self {
+            SortMode::Name => SortMode::Author,
+            SortMode::Author => SortMode::Year,
+            SortMode::Year => SortMode::Title,
+            SortMode::Title => SortMode::Name,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::Name => "name",
+            SortMode::Author => "author",
+            SortMode::Year => "year",
+            SortMode::Title => "title",
+        }
+    }
+}
+
 struct Entry {
     dir: PathBuf,
     dir_name: String,
@@ -55,6 +83,7 @@ pub struct App {
     add_input: Option<String>,
     enrich_preview: Option<EnrichPreview>,
     enrich_rx: Option<mpsc::Receiver<Vec<EnrichItem>>>,
+    sort_mode: SortMode,
 }
 
 type FieldDiff = (String, String, String); // (field, old, new)
@@ -585,6 +614,11 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         app.action_reindex();
                     }
+                    (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                        app.sort_mode = app.sort_mode.next();
+                        app.rebuild_filter();
+                        app.flash = Some((format!("Sort: {}", app.sort_mode.label()), std::time::Instant::now()));
+                    }
 
                     (KeyCode::Char('J'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         app.preview_scroll = app.preview_scroll.saturating_add(3);
@@ -670,6 +704,7 @@ impl App {
             add_input: None,
             enrich_preview: None,
             enrich_rx: None,
+            sort_mode: SortMode::Name,
         };
 
         if !app.filter.is_empty() {
@@ -694,6 +729,7 @@ impl App {
 
         if self.filter.is_empty() {
             self.filtered_indices = tag_filtered;
+            self.apply_sort();
         } else {
             let pattern = Pattern::parse(
                 &self.filter,
@@ -720,6 +756,35 @@ impl App {
             self.list_state.select(Some(0));
         }
         self.preview_scroll = 0;
+    }
+
+    fn apply_sort(&mut self) {
+        let entries = &self.entries;
+        self.filtered_indices.sort_by(|&a, &b| {
+            let ea = &entries[a];
+            let eb = &entries[b];
+            match self.sort_mode {
+                SortMode::Name => ea.dir_name.cmp(&eb.dir_name),
+                SortMode::Author => {
+                    let last_name = |s: &str| -> String {
+                        if s.contains(',') {
+                            s.split(',').next().unwrap_or(s).trim().to_lowercase()
+                        } else {
+                            s.rsplit_once(' ').map(|(_, l)| l).unwrap_or(s).to_lowercase()
+                        }
+                    };
+                    let aa = ea.reference.authors.first().map(|s| last_name(s)).unwrap_or_default();
+                    let ba = eb.reference.authors.first().map(|s| last_name(s)).unwrap_or_default();
+                    aa.cmp(&ba)
+                }
+                SortMode::Year => {
+                    let ya = ea.reference.year.unwrap_or(0);
+                    let yb = eb.reference.year.unwrap_or(0);
+                    yb.cmp(&ya)
+                }
+                SortMode::Title => ea.reference.title.to_lowercase().cmp(&eb.reference.title.to_lowercase()),
+            }
+        });
     }
 
     fn selected_entry(&self) -> Option<&Entry> {
@@ -1375,7 +1440,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(list, left_chunks[1], &mut app.list_state);
 
     // Status bar
-    let count = format!("  {}/{}", app.filtered_indices.len(), app.entries.len());
+    let sort_label = if app.filter.is_empty() { format!(" [{}]", app.sort_mode.label()) } else { String::new() };
+    let count = format!("  {}/{}{}", app.filtered_indices.len(), app.entries.len(), sort_label);
     let mode_indicator = match app.input_mode {
         InputMode::Normal => Span::styled(
             " NOR ",
@@ -1654,6 +1720,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             ("a", "Add paper (path, DOI, arXiv, URL)"),
             ("r", "Enrich selected (fetch metadata)"),
             ("R", "Enrich all with missing fields"),
+            ("s", "Cycle sort (name/author/year/title)"),
             ("d", "Deduplicate library"),
             ("I", "Reindex library"),
             ("c", "Clear search and tag filter"),
