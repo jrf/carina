@@ -36,11 +36,14 @@ pub struct App {
     config: AppConfig,
     theme: Theme,
     mode: Mode,
+    input_mode: InputMode,
     should_quit: bool,
     pending_output: Option<String>,
     tag_filter: Option<String>,
     all_tags: Vec<String>,
     tag_popup: Option<TagPopup>,
+    layout: LayoutMode,
+    last_insert_char: Option<std::time::Instant>,
 }
 
 struct TagPopup {
@@ -89,9 +92,52 @@ impl TagPopup {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LayoutMode {
+    Wide,
+    Tall,
+    Auto,
+}
+
+impl LayoutMode {
+    fn from_config(s: Option<&str>) -> Self {
+        match s {
+            Some("wide") => Self::Wide,
+            Some("tall") => Self::Tall,
+            _ => Self::Auto,
+        }
+    }
+
+    fn resolve(self, width: u16, _height: u16) -> ResolvedLayout {
+        match self {
+            Self::Wide => ResolvedLayout::Wide,
+            Self::Tall => ResolvedLayout::Tall,
+            Self::Auto => {
+                if width >= 100 {
+                    ResolvedLayout::Wide
+                } else {
+                    ResolvedLayout::Tall
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ResolvedLayout {
+    Wide,
+    Tall,
+}
+
 enum Mode {
     Browse,
     Cite { format: String },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum InputMode {
+    Normal,
+    Insert,
 }
 
 pub fn browse(config: &AppConfig, library: &Path, initial_query: Option<&str>) -> Result<()> {
@@ -182,39 +228,89 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                 continue;
             }
 
-            match (key.code, key.modifiers) {
-                (KeyCode::Esc, _) => app.should_quit = true,
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+            match app.input_mode {
+                InputMode::Insert => match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _) => {
+                        app.input_mode = InputMode::Normal;
+                        app.last_insert_char = None;
+                    }
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
 
-                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                    app.filter.push(c);
-                    app.rebuild_filter();
-                }
-                (KeyCode::Backspace, _) => {
-                    app.filter.pop();
-                    app.rebuild_filter();
-                }
+                    (KeyCode::Char('k'), KeyModifiers::NONE)
+                        if app.last_insert_char.is_some_and(|t| t.elapsed().as_millis() < 500)
+                            && app.filter.ends_with('j') =>
+                    {
+                        app.filter.pop();
+                        app.rebuild_filter();
+                        app.input_mode = InputMode::Normal;
+                        app.last_insert_char = None;
+                    }
+                    (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                        app.last_insert_char = Some(std::time::Instant::now());
+                        app.filter.push(c);
+                        app.rebuild_filter();
+                    }
+                    (KeyCode::Backspace, _) => {
+                        app.filter.pop();
+                        app.rebuild_filter();
+                        app.last_insert_char = None;
+                    }
 
-                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => app.move_up(),
-                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => app.move_down(),
-                (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
-                (KeyCode::Char('f'), KeyModifiers::CONTROL) => app.page_down(),
+                    (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => app.move_up(),
+                    (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => app.move_down(),
+                    (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
+                    (KeyCode::Char('f'), KeyModifiers::CONTROL) => app.page_down(),
 
-                (KeyCode::Tab, _) => {
-                    app.tag_popup = Some(TagPopup::new(&app.all_tags));
-                }
+                    (KeyCode::Tab, _) => {
+                        app.tag_popup = Some(TagPopup::new(&app.all_tags));
+                    }
 
-                (KeyCode::Enter, _) => {
-                    app.action_select()?;
-                }
-                (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-                    app.action_edit(terminal, tty_ctl)?;
-                }
-                (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-                    app.action_copy_bib()?;
-                }
+                    (KeyCode::Enter, _) => {
+                        app.action_select()?;
+                    }
 
-                _ => {}
+                    _ => {}
+                },
+                InputMode::Normal => match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                        app.should_quit = true;
+                    }
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+
+                    (KeyCode::Char('/'), KeyModifiers::NONE)
+                    | (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                        app.input_mode = InputMode::Insert;
+                    }
+
+                    (KeyCode::Char('j'), KeyModifiers::NONE)
+                    | (KeyCode::Down, _)
+                    | (KeyCode::Char('n'), KeyModifiers::CONTROL) => app.move_down(),
+                    (KeyCode::Char('k'), KeyModifiers::NONE)
+                    | (KeyCode::Up, _)
+                    | (KeyCode::Char('p'), KeyModifiers::CONTROL) => app.move_up(),
+                    (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
+                    (KeyCode::Char('f'), KeyModifiers::CONTROL) => app.page_down(),
+                    (KeyCode::Char('g'), KeyModifiers::NONE) => app.move_to_top(),
+                    (KeyCode::Char('G'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        app.move_to_bottom();
+                    }
+
+                    (KeyCode::Tab, _) => {
+                        app.tag_popup = Some(TagPopup::new(&app.all_tags));
+                    }
+
+                    (KeyCode::Enter, _) => {
+                        app.action_select()?;
+                    }
+                    (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                        app.action_edit(terminal, tty_ctl)?;
+                    }
+                    (KeyCode::Char('y'), KeyModifiers::NONE) => {
+                        app.action_copy_bib()?;
+                    }
+
+                    _ => {}
+                },
             }
         }
     }
@@ -269,14 +365,18 @@ impl App {
                 reader: config.reader.clone(),
                 picker: config.picker.clone(),
                 theme: config.theme.clone(),
+                layout: config.layout.clone(),
             },
             theme,
             mode,
+            input_mode: InputMode::Insert,
             should_quit: false,
             pending_output: None,
             tag_filter: None,
             all_tags,
             tag_popup: None,
+            layout: LayoutMode::from_config(config.layout.as_deref()),
+            last_insert_char: None,
         };
 
         if !app.filter.is_empty() {
@@ -372,6 +472,18 @@ impl App {
         let i = self.list_state.selected().unwrap_or(0);
         let max = self.filtered_indices.len() - 1;
         self.list_state.select(Some((i + 20).min(max)));
+    }
+
+    fn move_to_top(&mut self) {
+        if !self.filtered_indices.is_empty() {
+            self.list_state.select(Some(0));
+        }
+    }
+
+    fn move_to_bottom(&mut self) {
+        if !self.filtered_indices.is_empty() {
+            self.list_state.select(Some(self.filtered_indices.len() - 1));
+        }
     }
 
     fn action_select(&mut self) -> Result<()> {
@@ -505,18 +617,34 @@ fn draw(f: &mut Frame, app: &mut App) {
     let s_accent = Style::default().fg(t.accent);
     let s_warm = Style::default().fg(t.warm);
 
-    let chunks = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(f.area());
+    let area = f.area();
+    let resolved = app.layout.resolve(area.width, area.height);
+
+    let (list_area, preview_area) = match resolved {
+        ResolvedLayout::Wide => {
+            let chunks = Layout::horizontal([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(area);
+            (chunks[0], Some(chunks[1]))
+        }
+        ResolvedLayout::Tall => {
+            let chunks = Layout::vertical([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(area);
+            (chunks[0], Some(chunks[1]))
+        }
+    };
 
     let left_chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
-    .split(chunks[0]);
+    .split(list_area);
 
     // Filter input
     let prompt = " search: ";
@@ -532,10 +660,12 @@ fn draw(f: &mut Frame, app: &mut App) {
         left_chunks[0],
     );
 
-    let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0); // "[tag] "
-    let cursor_x = left_chunks[0].x + prompt.len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
-    let cursor_y = left_chunks[0].y;
-    f.set_cursor_position((cursor_x, cursor_y));
+    if app.input_mode == InputMode::Insert {
+        let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
+        let cursor_x = left_chunks[0].x + prompt.len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
+        let cursor_y = left_chunks[0].y;
+        f.set_cursor_position((cursor_x, cursor_y));
+    }
 
     // Paper list — year + author + title
     let list_width = left_chunks[1].width as usize;
@@ -581,12 +711,18 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Status bar
     let count = format!("  {}/{}", app.filtered_indices.len(), app.entries.len());
-    let mode_hint = match &app.mode {
-        Mode::Browse => "  enter open  ^e edit  ^y bib  tab tags  esc quit",
-        Mode::Cite { .. } => "  enter select  tab tags  esc cancel",
+    let mode_indicator = match app.input_mode {
+        InputMode::Normal => Span::styled(" NOR ", s_accent.add_modifier(Modifier::BOLD)),
+        InputMode::Insert => Span::styled(" INS ", s_warm.add_modifier(Modifier::BOLD)),
+    };
+    let mode_hint = match (app.input_mode, &app.mode) {
+        (InputMode::Insert, _) => "  esc normal",
+        (InputMode::Normal, Mode::Browse) => "  / search  e edit  y bib  tab tags  q quit",
+        (InputMode::Normal, Mode::Cite { .. }) => "  / search  enter select  tab tags  q quit",
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
+            mode_indicator,
             Span::styled(count, s_muted),
             Span::styled(mode_hint, s_muted),
         ])),
@@ -594,89 +730,39 @@ fn draw(f: &mut Frame, app: &mut App) {
     );
 
     // Preview pane
-    let preview_area = Layout::horizontal([
-        Constraint::Length(2),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(chunks[1]);
-
-    let sep = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(t.border));
-    f.render_widget(sep, chunks[1]);
-
-    if let Some(entry) = app.selected_entry() {
-        let r = &entry.reference;
-        let mut lines: Vec<Line> = Vec::new();
-
-        lines.push(Line::from(""));
-
-        // Title
-        lines.push(Line::from(Span::styled(
-            &r.title,
-            s_text.add_modifier(Modifier::BOLD),
-        )));
-
-        // Year + journal
-        if r.year.is_some() || r.journal.is_some() {
-            let mut parts = Vec::new();
-            if let Some(year) = r.year {
-                parts.push(Span::styled(year.to_string(), s_warm));
-            }
-            if let Some(ref journal) = r.journal {
-                if r.year.is_some() {
-                    parts.push(Span::styled(" · ", s_muted));
-                }
-                parts.push(Span::styled(journal.as_str(), s_dim));
-            }
-            lines.push(Line::from(parts));
-        }
-
-        lines.push(Line::from(""));
-
-        // Authors
-        if !r.authors.is_empty() {
-            let author_text = r.authors.join(", ");
-            lines.push(Line::from(Span::styled(author_text, s_accent)));
-            lines.push(Line::from(""));
-        }
-
-        // Metadata
-        if let Some(ref doi) = r.doi {
-            lines.push(Line::from(vec![
-                Span::styled("doi   ", s_muted),
-                Span::styled(doi.as_str(), s_dim),
-            ]));
-        }
-        if let Some(ref arxiv) = r.arxiv {
-            lines.push(Line::from(vec![
-                Span::styled("arxiv ", s_muted),
-                Span::styled(arxiv.as_str(), s_dim),
-            ]));
-        }
-        if !r.tags.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("tags  ", s_muted),
-                Span::styled(r.tags.join(", "), s_warm),
-            ]));
-        }
-
-        // Abstract
-        if let Some(ref abs) = r.r#abstract {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(abs.as_str(), s_dim)));
-        }
-
-        f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            preview_area[1],
-        );
-    } else {
-        f.render_widget(
-            Paragraph::new(Span::styled("No selection", s_muted)),
-            preview_area[1],
-        );
+    if let Some(pane_area) = preview_area {
+        let (_sep_border, content_area) = if resolved == ResolvedLayout::Wide {
+            let inner = Layout::horizontal([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(pane_area);
+            let sep = Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(t.border));
+            f.render_widget(sep, pane_area);
+            ((), inner[1])
+        } else {
+            let inner = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .split(pane_area);
+            let sep = Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(t.border));
+            f.render_widget(sep, inner[0]);
+            let content = Layout::horizontal([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner[1]);
+            ((), content[1])
+        };
+        let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, accent: s_accent, warm: s_warm };
+        draw_preview(f, app, content_area, &styles);
     }
 
     // Tag picker popup
@@ -743,6 +829,94 @@ fn draw(f: &mut Frame, app: &mut App) {
 
         let hint = Line::from(Span::styled(" enter select  esc cancel", s_muted));
         f.render_widget(Paragraph::new(hint), popup_chunks[2]);
+    }
+}
+
+struct Styles {
+    text: Style,
+    dim: Style,
+    muted: Style,
+    accent: Style,
+    warm: Style,
+}
+
+fn draw_preview(
+    f: &mut Frame,
+    app: &App,
+    area: ratatui::layout::Rect,
+    s: &Styles,
+) {
+    let s_text = s.text;
+    let s_dim = s.dim;
+    let s_muted = s.muted;
+    let s_accent = s.accent;
+    let s_warm = s.warm;
+    if let Some(entry) = app.selected_entry() {
+        let r = &entry.reference;
+        let mut lines: Vec<Line> = Vec::new();
+
+        lines.push(Line::from(""));
+
+        lines.push(Line::from(Span::styled(
+            &r.title,
+            s_text.add_modifier(Modifier::BOLD),
+        )));
+
+        if r.year.is_some() || r.journal.is_some() {
+            let mut parts = Vec::new();
+            if let Some(year) = r.year {
+                parts.push(Span::styled(year.to_string(), s_warm));
+            }
+            if let Some(ref journal) = r.journal {
+                if r.year.is_some() {
+                    parts.push(Span::styled(" · ", s_muted));
+                }
+                parts.push(Span::styled(journal.as_str(), s_dim));
+            }
+            lines.push(Line::from(parts));
+        }
+
+        lines.push(Line::from(""));
+
+        if !r.authors.is_empty() {
+            let author_text = r.authors.join(", ");
+            lines.push(Line::from(Span::styled(author_text, s_accent)));
+            lines.push(Line::from(""));
+        }
+
+        if let Some(ref doi) = r.doi {
+            lines.push(Line::from(vec![
+                Span::styled("doi   ", s_muted),
+                Span::styled(doi.as_str(), s_dim),
+            ]));
+        }
+        if let Some(ref arxiv) = r.arxiv {
+            lines.push(Line::from(vec![
+                Span::styled("arxiv ", s_muted),
+                Span::styled(arxiv.as_str(), s_dim),
+            ]));
+        }
+        if !r.tags.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("tags  ", s_muted),
+                Span::styled(r.tags.join(", "), s_warm),
+            ]));
+        }
+
+        if let Some(ref abs) = r.r#abstract {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(abs.as_str(), s_dim)));
+        }
+
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            area,
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(Span::styled("No selection", s_muted)),
+            area,
+        );
     }
 }
 

@@ -10,6 +10,7 @@ pub struct Config {
     pub reader: Option<String>,
     pub picker: Option<String>,
     pub theme: Option<String>,
+    pub layout: Option<String>,
 }
 
 impl Config {
@@ -25,6 +26,7 @@ impl Config {
                 reader: None,
                 picker: None,
                 theme: None,
+                layout: None,
             })
         }
     }
