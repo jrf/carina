@@ -1761,7 +1761,7 @@ fn draw_preview(
         lines.push(Line::from(""));
 
         if !r.authors.is_empty() {
-            let author_text = r.authors.join(", ");
+            let author_text = r.authors.join(" · ");
             lines.push(Line::from(Span::styled(author_text, s_accent)));
             lines.push(Line::from(""));
         }
@@ -2058,7 +2058,7 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
     lines.push(Line::default());
 
     if !r.authors.is_empty() {
-        lines.push(Line::from(Span::styled(r.authors.join(", "), s_accent)));
+        lines.push(Line::from(Span::styled(r.authors.join(" · "), s_accent)));
     }
     if let Some(year) = r.year {
         lines.push(Line::from(Span::styled(format!("{}", year), s_dim)));
