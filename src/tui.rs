@@ -1,14 +1,19 @@
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::ExecutableCommand;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
+use ratatui::{Frame, Terminal};
 
 use crate::config::Config as AppConfig;
 use crate::metadata;
@@ -58,16 +63,38 @@ pub fn cite(config: &AppConfig, library: &Path, format: &str) -> Result<()> {
 }
 
 fn run_app(mut app: App) -> Result<()> {
-    let mut terminal = ratatui::init();
-    let result = run_event_loop(&mut terminal, &mut app);
-    ratatui::restore();
+    let tty = File::options().read(true).write(true).open("/dev/tty")?;
+    let mut tty_ctl = tty.try_clone()?;
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = terminal::disable_raw_mode();
+        if let Ok(mut f) = File::options().write(true).open("/dev/tty") {
+            let _ = f.execute(LeaveAlternateScreen);
+        }
+        prev_hook(info);
+    }));
+
+    tty_ctl.execute(EnterAlternateScreen)?;
+    terminal::enable_raw_mode()?;
+
+    let backend = CrosstermBackend::new(BufWriter::new(tty.try_clone()?));
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_event_loop(&mut terminal, &mut app, &mut tty_ctl);
+
+    terminal::disable_raw_mode()?;
+    tty_ctl.execute(LeaveAlternateScreen)?;
+
     if let Some(output) = app.pending_output.take() {
         print!("{}", output);
     }
     result
 }
 
-fn run_event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+type Term = Terminal<CrosstermBackend<BufWriter<File>>>;
+
+fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Result<()> {
     loop {
         terminal.draw(|f| draw(f, app))?;
 
@@ -98,7 +125,7 @@ fn run_event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Res
                     app.action_select()?;
                 }
                 (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-                    app.action_edit(terminal)?;
+                    app.action_edit(terminal, tty_ctl)?;
                 }
                 (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
                     app.action_copy_bib()?;
@@ -286,17 +313,24 @@ impl App {
         Ok(())
     }
 
-    fn action_edit(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    fn action_edit(&mut self, terminal: &mut Term, tty_ctl: &mut File) -> Result<()> {
         let entry = match self.selected_entry() {
             Some(e) => e,
             None => return Ok(()),
         };
         let info_path = entry.dir.join("info.toml");
-        ratatui::restore();
+
+        terminal::disable_raw_mode()?;
+        tty_ctl.execute(LeaveAlternateScreen)?;
+
         std::process::Command::new(self.config.editor())
             .arg(&info_path)
             .status()?;
-        // Reload the entry after editing
+
+        tty_ctl.execute(EnterAlternateScreen)?;
+        terminal::enable_raw_mode()?;
+        terminal.clear()?;
+
         let idx = self.filtered_indices[self.list_state.selected().unwrap_or(0)];
         if let Ok(r) = metadata::read_info(&self.entries[idx].dir) {
             let authors = if r.authors.is_empty() {
@@ -315,7 +349,6 @@ impl App {
             self.entries[idx].reference = r;
             self.entries[idx].display = display;
         }
-        *terminal = ratatui::init();
         Ok(())
     }
 
@@ -378,7 +411,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     .split(f.area());
 
     let left_chunks = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
@@ -394,11 +427,8 @@ fn draw(f: &mut Frame, app: &mut App) {
             Span::styled(&app.filter, s_text),
         ]
     };
-    let filter_block = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(t.border));
     f.render_widget(
-        Paragraph::new(Line::from(filter_spans)).block(filter_block),
+        Paragraph::new(Line::from(filter_spans)),
         left_chunks[0],
     );
 
@@ -407,6 +437,10 @@ fn draw(f: &mut Frame, app: &mut App) {
     f.set_cursor_position((cursor_x, cursor_y));
 
     // Paper list — year + author + title
+    let list_width = left_chunks[1].width as usize;
+    let prefix_width = 3 + 6 + 14; // highlight_symbol + year + author
+    let title_max = list_width.saturating_sub(prefix_width);
+
     let items: Vec<ListItem> = app
         .filtered_indices
         .iter()
@@ -428,10 +462,12 @@ fn draw(f: &mut Frame, app: &mut App) {
                 })
                 .unwrap_or_else(|| "              ".to_string());
 
+            let title = truncate_ellipsis(&r.title, title_max);
+
             ListItem::new(Line::from(vec![
                 Span::styled(year_str, s_muted),
                 Span::styled(author_str, s_dim),
-                Span::styled(&r.title, s_text),
+                Span::styled(title, s_text),
             ]))
         })
         .collect();
@@ -555,5 +591,14 @@ fn truncate_str(s: &str, max: usize) -> &str {
         s
     } else {
         &s[..s.floor_char_boundary(max)]
+    }
+}
+
+fn truncate_ellipsis(s: &str, max: usize) -> String {
+    if max < 2 || s.len() <= max {
+        s.to_string()
+    } else {
+        let end = s.floor_char_boundary(max - 1);
+        format!("{}…", &s[..end])
     }
 }

@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["use-dev-tty"] }
 dirs = "6"
 lopdf = "0.34"
 nucleo-matcher = "0.3"
