@@ -5,6 +5,8 @@ mod index;
 mod metadata;
 mod model;
 mod storage;
+mod theme;
+mod tui;
 
 use std::path::{Path, PathBuf};
 
@@ -118,83 +120,6 @@ fn main() -> Result<()> {
     }
 }
 
-fn launch_fzf(config: &Config, library: &Path, entries: &[(String, String)], initial_query: Option<&str>) -> Result<()> {
-    if entries.is_empty() {
-        println!("No results.");
-        return Ok(());
-    }
-
-    let carina_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("carina"));
-    let library_str = library.to_string_lossy();
-    let bin_str = carina_bin.to_string_lossy();
-
-    let input = entries
-        .iter()
-        .map(|(name, display)| format!("{}\t{}", name, display))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let preview_cmd = format!(
-        "CARINA_LIBRARY={} {} show {{1}}",
-        shell_escape(&library_str), shell_escape(&bin_str)
-    );
-    let open_cmd = format!(
-        "CARINA_LIBRARY={} {} open {{1}}",
-        shell_escape(&library_str), shell_escape(&bin_str)
-    );
-    let edit_cmd = format!(
-        "CARINA_LIBRARY={} {} edit {{1}}",
-        shell_escape(&library_str), shell_escape(&bin_str)
-    );
-    let bib_cmd = format!(
-        "CARINA_LIBRARY={} {} bib {{1}} | pbcopy",
-        shell_escape(&library_str), shell_escape(&bin_str)
-    );
-
-    let mut args = vec![
-        "--delimiter=\t".to_string(),
-        "--with-nth=2..".to_string(),
-        "--height=100%".to_string(),
-        "--preview".to_string(), preview_cmd,
-        "--preview-window=right:40%:wrap".to_string(),
-        "--preview-wrap-sign=".to_string(),
-        format!("--bind=enter:execute({})+abort", open_cmd),
-        format!("--bind=ctrl-e:execute({})", edit_cmd),
-        format!("--bind=ctrl-y:execute-silent({})", bib_cmd),
-        "--bind=ctrl-f:page-down,ctrl-b:page-up".to_string(),
-        "--header=enter: open │ ctrl-e: edit │ ctrl-y: copy bib".to_string(),
-        "--no-mouse".to_string(),
-    ];
-
-    if let Some(q) = initial_query {
-        args.push(format!("--query={}", q));
-    }
-
-    let picker = config.picker();
-    let status = std::process::Command::new(&picker)
-        .args(&args)
-        .env("CARINA_LIBRARY", library.as_os_str())
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.take() {
-                let mut stdin = stdin;
-                let _ = stdin.write_all(input.as_bytes());
-                drop(stdin);
-            }
-            child.wait()
-        });
-
-    match status {
-        Ok(s) if s.success() || s.code() == Some(130) => Ok(()),
-        Ok(s) => anyhow::bail!("{} exited with status {}", picker, s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            anyhow::bail!("{} not found — install it with your package manager", picker)
-        }
-        Err(e) => Err(e).with_context(|| format!("Failed to launch {}", picker)),
-    }
-}
 
 fn cmd_add(_config: &Config, library: &Path, input: &str) -> Result<()> {
     std::fs::create_dir_all(library)?;
@@ -294,117 +219,16 @@ fn add_from_file(library: &Path, path: &str) -> Result<()> {
 }
 
 fn cmd_search(config: &Config, library: &Path, query: &[String]) -> Result<()> {
-    let dirs = storage::list_ref_dirs(library)?;
-    if dirs.is_empty() {
-        println!("Library is empty. Use `carina add <file.pdf>` to import a paper.");
-        return Ok(());
-    }
-
-    let entries: Vec<(String, String)> = dirs
-        .iter()
-        .filter_map(|dir| {
-            let dir_name = dir.file_name()?.to_string_lossy().to_string();
-            let r = metadata::read_info(dir).ok()?;
-            let authors = if r.authors.is_empty() {
-                String::new()
-            } else if r.authors.len() == 1 {
-                r.authors[0].clone()
-            } else {
-                format!("{} et al.", r.authors[0])
-            };
-            let year = r.year.map(|y| format!("({})", y)).unwrap_or_default();
-            let display = [authors, year, r.title]
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("  ");
-            Some((dir_name, display))
-        })
-        .collect();
-
     let initial = if query.is_empty() {
         None
     } else {
         Some(query.join(" "))
     };
-
-    launch_fzf(config, library, &entries, initial.as_deref())
+    tui::browse(config, library, initial.as_deref())
 }
 
 fn cmd_cite(config: &Config, library: &Path, format: &str) -> Result<()> {
-    let dirs = storage::list_ref_dirs(library)?;
-    if dirs.is_empty() {
-        anyhow::bail!("Library is empty");
-    }
-
-    let mut lines = Vec::new();
-    for dir in &dirs {
-        let dir_name = match dir.file_name() {
-            Some(n) => n.to_string_lossy().to_string(),
-            None => continue,
-        };
-        let r = match metadata::read_info(dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let authors = if r.authors.is_empty() {
-            String::new()
-        } else if r.authors.len() == 1 {
-            r.authors[0].clone()
-        } else {
-            format!("{} et al.", r.authors[0])
-        };
-        let year = r.year.map(|y| format!("({})", y)).unwrap_or_default();
-        let display = [authors, year, r.title]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("  ");
-        lines.push(format!("{}\t{}", dir_name, display));
-    }
-
-    let input = lines.join("\n");
-
-    let picker = config.picker();
-    let output = std::process::Command::new(&picker)
-        .args([
-            "--delimiter=\t",
-            "--with-nth=2..",
-            "--height=100%",
-            "--no-mouse",
-            "--header=Pick a reference",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.take() {
-                let mut stdin = stdin;
-                let _ = stdin.write_all(input.as_bytes());
-                drop(stdin);
-            }
-            child.wait_with_output()
-        })
-        .context("Failed to launch fzf")?;
-
-    if !output.status.success() {
-        return Ok(());
-    }
-
-    let selected = String::from_utf8_lossy(&output.stdout);
-    let key = selected.split('\t').next().unwrap_or("").trim();
-    if key.is_empty() {
-        return Ok(());
-    }
-
-    match format {
-        "latex" => print!("\\cite{{{}}}", key),
-        "typst" => print!("@{}", key),
-        _ => print!("{}", key),
-    }
-
-    Ok(())
+    tui::cite(config, library, format)
 }
 
 fn cmd_duplicates(library: &Path) -> Result<()> {
@@ -500,7 +324,7 @@ fn find_duplicate_groups(library: &Path) -> Result<Vec<Vec<PathBuf>>> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut groups: Vec<Vec<PathBuf>> = Vec::new();
 
-    for (_, paths) in &by_title {
+    for paths in by_title.values() {
         if paths.len() > 1 {
             let group: Vec<_> = paths.iter().filter(|p| !seen.contains(*p)).cloned().collect();
             if group.len() > 1 {
@@ -512,7 +336,7 @@ fn find_duplicate_groups(library: &Path) -> Result<Vec<Vec<PathBuf>>> {
         }
     }
 
-    for (_, paths) in &by_doi {
+    for paths in by_doi.values() {
         if paths.len() > 1 {
             let group: Vec<_> = paths.iter().filter(|p| !seen.contains(*p)).cloned().collect();
             if group.len() > 1 {
@@ -576,9 +400,9 @@ fn cmd_dedup(config: &Config, library: &Path) -> Result<()> {
                 let has_pdf = p.read_dir().map(|rd| rd.flatten().any(|e| {
                     e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
                 })).unwrap_or(false);
-                let indicators = format!("{}{}",
+                let indicators = format!("{} ({}/9 fields)",
                     if has_pdf { " [PDF]" } else { "" },
-                    format!(" ({}/9 fields)", score),
+                    score,
                 );
                 format!("{}\t{}{}", name, name, indicators)
             })
