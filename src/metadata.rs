@@ -82,6 +82,21 @@ fn dict_string(dict: &lopdf::Dictionary, key: &[u8]) -> Option<String> {
     })
 }
 
+pub fn extract_pdf_text(path: &Path) -> Option<String> {
+    const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+    const MAX_PAGES: u32 = 100;
+
+    let file_size = std::fs::metadata(path).ok()?.len();
+    if file_size > MAX_FILE_SIZE {
+        return None;
+    }
+
+    let doc = Document::load(path).ok()?;
+    let page_numbers: Vec<u32> = doc.get_pages().keys().copied().take(MAX_PAGES as usize).collect();
+    let text = doc.extract_text(&page_numbers).ok()?;
+    if text.trim().is_empty() { None } else { Some(text) }
+}
+
 fn parse_authors(raw: &str) -> Vec<String> {
     if raw.contains(';') {
         raw.split(';')

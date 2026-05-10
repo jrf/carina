@@ -69,6 +69,11 @@ enum Command {
         #[arg(short, long, default_value = "plain")]
         format: String,
     },
+    /// Manage tags on references
+    Tag {
+        #[command(subcommand)]
+        action: TagAction,
+    },
     /// Find duplicate references in the library
     Duplicates,
     /// Interactively resolve duplicates (pick which to keep)
@@ -86,6 +91,28 @@ enum Command {
         #[arg(short, long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum TagAction {
+    /// Add tags to a reference
+    Add {
+        /// Search query to find the reference
+        query: Vec<String>,
+        /// Tags to add
+        #[arg(short, long, num_args = 1..)]
+        tags: Vec<String>,
+    },
+    /// Remove tags from a reference
+    Rm {
+        /// Search query to find the reference
+        query: Vec<String>,
+        /// Tags to remove
+        #[arg(short, long, num_args = 1..)]
+        tags: Vec<String>,
+    },
+    /// List all tags in the library
+    List,
 }
 
 fn main() -> Result<()> {
@@ -108,6 +135,7 @@ fn main() -> Result<()> {
         Some(Command::Edit { query }) => cmd_edit(&config, &library, &query),
         Some(Command::Bib { query }) => cmd_bib(&library, &query),
         Some(Command::Cite { format }) => cmd_cite(&config, &library, &format),
+        Some(Command::Tag { action }) => cmd_tag(&library, action),
         Some(Command::Duplicates) => cmd_duplicates(&library),
         Some(Command::Dedup) => cmd_dedup(&config, &library),
         Some(Command::Reindex) => cmd_reindex(&library),
@@ -137,13 +165,22 @@ fn cmd_add(_config: &Config, library: &Path, input: &str) -> Result<()> {
         return add_from_doi(library, &doi);
     }
 
-    anyhow::bail!("Not a file, arXiv ID, or DOI: {}", input)
+    if input.starts_with("http://") || input.starts_with("https://") {
+        return add_from_url(library, input);
+    }
+
+    anyhow::bail!("Not a file, URL, arXiv ID, or DOI: {}", input)
 }
 
 fn index_reference(library: &Path, ref_dir: &Path, reference: &crate::model::Reference) {
     if let Ok(idx) = index::Index::open(library) {
         let dir_name = ref_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let _ = idx.upsert(&dir_name, reference);
+        let pdf_path = reference.files.first().map(|f| ref_dir.join(f));
+        let fulltext = pdf_path
+            .as_ref()
+            .filter(|p| p.exists())
+            .and_then(|p| metadata::extract_pdf_text(p));
+        let _ = idx.upsert_with_fulltext(&dir_name, reference, fulltext.as_deref());
     }
 }
 
@@ -216,6 +253,43 @@ fn add_from_file(library: &Path, path: &str) -> Result<()> {
     println!("Added: {}", reference.title);
     println!("  → {}", ref_dir.display());
     Ok(())
+}
+
+fn add_from_url(library: &Path, url: &str) -> Result<()> {
+    println!("Downloading PDF from URL...");
+
+    let response = reqwest::blocking::get(url)
+        .with_context(|| format!("Failed to download: {}", url))?;
+
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !content_type.contains("pdf") && !url.ends_with(".pdf") {
+        eprintln!("Warning: URL may not be a PDF (content-type: {})", content_type);
+    }
+
+    let filename = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("download")
+        .split('?')
+        .next()
+        .unwrap_or("download");
+    let filename = if filename.ends_with(".pdf") {
+        filename.to_string()
+    } else {
+        format!("{}.pdf", filename)
+    };
+
+    let tmp_dir = tempfile::tempdir()?;
+    let tmp_path = tmp_dir.path().join(&filename);
+    let bytes = response.bytes()?;
+    std::fs::write(&tmp_path, &bytes)?;
+
+    add_from_file(library, tmp_path.to_str().unwrap())
 }
 
 fn cmd_search(config: &Config, library: &Path, query: &[String]) -> Result<()> {
@@ -515,6 +589,55 @@ fn cmd_list(library: &Path, tag_filter: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_tag(library: &Path, action: TagAction) -> Result<()> {
+    match action {
+        TagAction::Add { query, tags } => {
+            let dir = find_reference(library, &query)?;
+            let mut r = metadata::read_info(&dir)?;
+            for tag in &tags {
+                let tag = tag.to_lowercase();
+                if !r.tags.iter().any(|t| t == &tag) {
+                    r.tags.push(tag);
+                }
+            }
+            r.tags.sort();
+            metadata::write_info(&dir, &r)?;
+            index_reference(library, &dir, &r);
+            println!("{}: {}", r.title, r.tags.join(", "));
+            Ok(())
+        }
+        TagAction::Rm { query, tags } => {
+            let dir = find_reference(library, &query)?;
+            let mut r = metadata::read_info(&dir)?;
+            let tags_lower: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+            r.tags.retain(|t| !tags_lower.contains(t));
+            metadata::write_info(&dir, &r)?;
+            index_reference(library, &dir, &r);
+            println!("{}: {}", r.title, if r.tags.is_empty() { "(no tags)".to_string() } else { r.tags.join(", ") });
+            Ok(())
+        }
+        TagAction::List => {
+            let mut tag_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            let dirs = storage::list_ref_dirs(library)?;
+            for dir in &dirs {
+                if let Ok(r) = metadata::read_info(dir) {
+                    for tag in &r.tags {
+                        *tag_counts.entry(tag.clone()).or_default() += 1;
+                    }
+                }
+            }
+            if tag_counts.is_empty() {
+                println!("No tags found.");
+            } else {
+                for (tag, count) in &tag_counts {
+                    println!("{:>4}  {}", count, tag);
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 fn cmd_show(library: &Path, name: &str) -> Result<()> {

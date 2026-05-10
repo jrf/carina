@@ -18,6 +18,24 @@ impl Index {
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
+        let has_fulltext: bool = conn
+            .prepare("PRAGMA table_info(reference)")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(1))
+                    .map(|rows| rows.flatten().any(|name| name == "fulltext"))
+            })
+            .unwrap_or(false);
+
+        if !has_fulltext {
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS reference_ai;
+                 DROP TRIGGER IF EXISTS reference_ad;
+                 DROP TRIGGER IF EXISTS reference_au;
+                 DROP TABLE IF EXISTS reference_fts;
+                 DROP TABLE IF EXISTS reference;"
+            )?;
+        }
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS reference (
                 dir_name TEXT PRIMARY KEY,
@@ -29,30 +47,31 @@ impl Index {
                 journal TEXT,
                 tags TEXT NOT NULL DEFAULT '',
                 abstract_text TEXT,
-                files TEXT NOT NULL DEFAULT ''
+                files TEXT NOT NULL DEFAULT '',
+                fulltext TEXT
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS reference_fts USING fts5(
-                title, authors, abstract_text, tags,
+                title, authors, abstract_text, tags, fulltext,
                 content='reference',
                 content_rowid='rowid'
             );
 
             CREATE TRIGGER IF NOT EXISTS reference_ai AFTER INSERT ON reference BEGIN
-                INSERT INTO reference_fts(rowid, title, authors, abstract_text, tags)
-                VALUES (new.rowid, new.title, new.authors, new.abstract_text, new.tags);
+                INSERT INTO reference_fts(rowid, title, authors, abstract_text, tags, fulltext)
+                VALUES (new.rowid, new.title, new.authors, new.abstract_text, new.tags, new.fulltext);
             END;
 
             CREATE TRIGGER IF NOT EXISTS reference_ad AFTER DELETE ON reference BEGIN
-                INSERT INTO reference_fts(reference_fts, rowid, title, authors, abstract_text, tags)
-                VALUES ('delete', old.rowid, old.title, old.authors, old.abstract_text, old.tags);
+                INSERT INTO reference_fts(reference_fts, rowid, title, authors, abstract_text, tags, fulltext)
+                VALUES ('delete', old.rowid, old.title, old.authors, old.abstract_text, old.tags, old.fulltext);
             END;
 
             CREATE TRIGGER IF NOT EXISTS reference_au AFTER UPDATE ON reference BEGIN
-                INSERT INTO reference_fts(reference_fts, rowid, title, authors, abstract_text, tags)
-                VALUES ('delete', old.rowid, old.title, old.authors, old.abstract_text, old.tags);
-                INSERT INTO reference_fts(rowid, title, authors, abstract_text, tags)
-                VALUES (new.rowid, new.title, new.authors, new.abstract_text, new.tags);
+                INSERT INTO reference_fts(reference_fts, rowid, title, authors, abstract_text, tags, fulltext)
+                VALUES ('delete', old.rowid, old.title, old.authors, old.abstract_text, old.tags, old.fulltext);
+                INSERT INTO reference_fts(rowid, title, authors, abstract_text, tags, fulltext)
+                VALUES (new.rowid, new.title, new.authors, new.abstract_text, new.tags, new.fulltext);
             END;"
         )?;
 
@@ -71,19 +90,28 @@ impl Index {
                 Err(_) => continue,
             };
             let dir_name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-            self.upsert(&dir_name, &reference)?;
+
+            let fulltext = find_pdf(dir, &reference)
+                .and_then(|p| metadata::extract_pdf_text(&p));
+
+            self.upsert_with_fulltext(&dir_name, &reference, fulltext.as_deref())?;
             count += 1;
         }
 
         Ok(count)
     }
 
+    #[allow(dead_code)]
     pub fn upsert(&self, dir_name: &str, r: &crate::model::Reference) -> Result<()> {
+        self.upsert_with_fulltext(dir_name, r, None)
+    }
+
+    pub fn upsert_with_fulltext(&self, dir_name: &str, r: &crate::model::Reference, fulltext: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO reference (dir_name, title, authors, year, doi, arxiv, journal, tags, abstract_text, files)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO reference (dir_name, title, authors, year, doi, arxiv, journal, tags, abstract_text, files, fulltext)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(dir_name) DO UPDATE SET
-                title=?2, authors=?3, year=?4, doi=?5, arxiv=?6, journal=?7, tags=?8, abstract_text=?9, files=?10",
+                title=?2, authors=?3, year=?4, doi=?5, arxiv=?6, journal=?7, tags=?8, abstract_text=?9, files=?10, fulltext=?11",
             params![
                 dir_name,
                 r.title,
@@ -95,6 +123,7 @@ impl Index {
                 r.tags.join(", "),
                 r.r#abstract,
                 r.files.join(", "),
+                fulltext,
             ],
         )?;
         Ok(())
@@ -134,7 +163,23 @@ impl Index {
         }
         Ok(results)
     }
+}
 
+fn find_pdf(dir: &Path, r: &crate::model::Reference) -> Option<std::path::PathBuf> {
+    if let Some(f) = r.files.first() {
+        let p = dir.join(f);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+        let p = e.path();
+        if p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+            Some(p)
+        } else {
+            None
+        }
+    })
 }
 
 #[allow(dead_code)]

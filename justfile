@@ -24,4 +24,5 @@ clean:
 
 install: release
     cp target/release/carina ~/.local/bin/carina
+    codesign -s - ~/.local/bin/carina
     @echo "Installed → ~/.local/bin/carina"
