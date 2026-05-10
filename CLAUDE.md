@@ -37,7 +37,7 @@ Directory naming: `{first-author}-{year}-{first-title-word}`, with `-2` suffix o
 - **Filesystem is truth.** SQLite is a disposable index. `carina reindex` rebuilds it from scratch.
 - **Opinionated defaults.** Library at `~/Papers`, `$EDITOR` for metadata editing, `open` for PDF viewing. Minimal config needed.
 - **Fast.** Rust + SQLite FTS5. No Python startup tax.
-- **Composable.** Output is pipe-friendly. Integrates with `fzf`, `jq`, `$EDITOR`.
+- **Composable.** Output is pipe-friendly. Integrates with `jq`, `$EDITOR`.
 
 ### Config
 

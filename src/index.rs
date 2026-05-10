@@ -16,6 +16,7 @@ impl Index {
         let conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open index at {}", db_path.display()))?;
 
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
         let has_fulltext: bool = conn
@@ -79,11 +80,12 @@ impl Index {
     }
 
     pub fn reindex(&self, library: &Path) -> Result<usize> {
-        self.conn.execute("DELETE FROM reference", [])?;
-
         let dirs = storage::list_ref_dirs(library)?;
-        let mut count = 0;
 
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM reference", [])?;
+
+        let mut count = 0;
         for dir in &dirs {
             let reference = match metadata::read_info(dir) {
                 Ok(r) => r,
@@ -94,10 +96,29 @@ impl Index {
             let fulltext = find_pdf(dir, &reference)
                 .and_then(|p| metadata::extract_pdf_text(&p));
 
-            self.upsert_with_fulltext(&dir_name, &reference, fulltext.as_deref())?;
+            tx.execute(
+                "INSERT INTO reference (dir_name, title, authors, year, doi, arxiv, journal, tags, abstract_text, files, fulltext)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(dir_name) DO UPDATE SET
+                    title=?2, authors=?3, year=?4, doi=?5, arxiv=?6, journal=?7, tags=?8, abstract_text=?9, files=?10, fulltext=?11",
+                params![
+                    dir_name,
+                    reference.title,
+                    reference.authors.join("; "),
+                    reference.year,
+                    reference.doi,
+                    reference.arxiv,
+                    reference.journal,
+                    reference.tags.join(", "),
+                    reference.r#abstract,
+                    reference.files.join(", "),
+                    fulltext,
+                ],
+            )?;
             count += 1;
         }
 
+        tx.commit()?;
         Ok(count)
     }
 

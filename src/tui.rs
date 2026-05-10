@@ -477,6 +477,12 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     (KeyCode::Char('o'), KeyModifiers::NONE) => {
                         app.action_open_url();
                     }
+                    (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                        app.action_add(terminal, tty_ctl)?;
+                    }
+                    (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                        run_dedup(terminal, app)?;
+                    }
 
                     (KeyCode::Char('J'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         app.preview_scroll = app.preview_scroll.saturating_add(3);
@@ -542,7 +548,6 @@ impl App {
                 library: config.library.clone(),
                 editor: config.editor.clone(),
                 reader: config.reader.clone(),
-                picker: config.picker.clone(),
                 theme: config.theme.clone(),
                 layout: config.layout.clone(),
             },
@@ -819,6 +824,86 @@ impl App {
         self.flash.as_ref().and_then(|(msg, t)| {
             if t.elapsed().as_secs() < 2 { Some(msg.as_str()) } else { None }
         })
+    }
+
+    fn action_add(&mut self, terminal: &mut Term, tty_ctl: &mut File) -> Result<()> {
+        terminal::disable_raw_mode()?;
+        tty_ctl.execute(LeaveAlternateScreen)?;
+
+        print!("Add (path, DOI, arXiv ID, or URL): ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        if !input.is_empty() {
+            let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("carina"));
+            let status = std::process::Command::new(bin)
+                .arg("add")
+                .arg(input)
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("\nPress enter to continue...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                }
+                Ok(_) => {
+                    println!("\nAdd failed. Press enter to continue...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                }
+                Err(e) => {
+                    println!("\nError: {}. Press enter to continue...", e);
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                }
+            }
+        }
+
+        tty_ctl.execute(EnterAlternateScreen)?;
+        terminal::enable_raw_mode()?;
+        terminal.clear()?;
+
+        self.reload_entries();
+        Ok(())
+    }
+
+    fn reload_entries(&mut self) {
+        let library = self.config.library_dir();
+        let dirs = match storage::list_ref_dirs(&library) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        self.entries = dirs
+            .into_iter()
+            .filter_map(|dir| {
+                let dir_name = dir.file_name()?.to_string_lossy().to_string();
+                let reference = metadata::read_info(&dir).ok()?;
+                let authors = if reference.authors.is_empty() {
+                    String::new()
+                } else if reference.authors.len() == 1 {
+                    reference.authors[0].clone()
+                } else {
+                    format!("{} et al.", reference.authors[0])
+                };
+                let year = reference.year.map(|y| format!("({})", y)).unwrap_or_default();
+                let display = [authors, year, reference.title.clone()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                Some(Entry { dir, dir_name, reference, display })
+            })
+            .collect();
+
+        let mut tag_set = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            for tag in &e.reference.tags {
+                tag_set.insert(tag.clone());
+            }
+        }
+        self.all_tags = tag_set.into_iter().collect();
+        self.rebuild_filter();
     }
 
     fn action_open_url(&mut self) {
@@ -1147,6 +1232,8 @@ fn draw(f: &mut Frame, app: &mut App) {
             ("e", "Edit info.toml"),
             ("y", "Copy BibTeX"),
             ("o", "Open DOI / arXiv in browser"),
+            ("a", "Add paper (path, DOI, arXiv, URL)"),
+            ("d", "Deduplicate library"),
             ("c", "Clear search and tag filter"),
             ("t", "Browse tags"),
             ("T", "Switch theme"),
@@ -1310,4 +1397,289 @@ fn truncate_ellipsis(s: &str, max: usize) -> String {
         let end = s.floor_char_boundary(max - 1);
         format!("{}…", &s[..end])
     }
+}
+
+// --- Dedup TUI ---
+
+fn run_dedup(terminal: &mut Term, app: &mut App) -> Result<()> {
+    let library = app.config.library_dir();
+    let groups = find_duplicate_groups(&library)?;
+    if groups.is_empty() {
+        app.flash = Some(("No duplicates found".to_string(), std::time::Instant::now()));
+        return Ok(());
+    }
+
+    let trash_dir = library.join(".trash");
+    let mut removed = 0usize;
+    let total_groups = groups.len();
+
+    for (group_idx, group) in groups.iter().enumerate() {
+        let mut selected: usize = 0;
+        let entries: Vec<DedupEntry> = group.iter().map(|p| DedupEntry::from_path(p)).collect();
+
+        if let Some((best, _)) = entries.iter().enumerate().max_by_key(|(_, e)| e.score) {
+            selected = best;
+        }
+
+        loop {
+            let theme = &app.theme;
+            terminal.draw(|f| {
+                draw_dedup(f, theme, &entries, selected, group_idx, total_groups);
+            })?;
+
+            if let Event::Key(key) = event::read()? {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('q'), _) | (KeyCode::Esc, _)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        let msg = if removed > 0 {
+                            format!("Dedup: removed {}", removed)
+                        } else {
+                            "Dedup cancelled".to_string()
+                        };
+                        app.flash = Some((msg, std::time::Instant::now()));
+                        terminal.clear()?;
+                        return Ok(());
+                    }
+                    (KeyCode::Char('s'), _) => break,
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                        selected = selected.saturating_sub(1);
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                        selected = (selected + 1).min(entries.len() - 1);
+                    }
+                    (KeyCode::Enter, _) => {
+                        std::fs::create_dir_all(&trash_dir)?;
+                        for (i, entry) in entries.iter().enumerate() {
+                            if i != selected {
+                                let dest = trash_dir.join(&entry.dir_name);
+                                std::fs::rename(&entry.path, &dest)?;
+                                removed += 1;
+                            }
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let msg = if removed > 0 {
+        format!("Dedup: removed {} (run reindex)", removed)
+    } else {
+        "Dedup: no changes".to_string()
+    };
+    app.flash = Some((msg, std::time::Instant::now()));
+    terminal.clear()?;
+    Ok(())
+}
+
+struct DedupEntry {
+    path: PathBuf,
+    dir_name: String,
+    reference: Reference,
+    score: u32,
+    has_pdf: bool,
+}
+
+impl DedupEntry {
+    fn from_path(path: &Path) -> Self {
+        let dir_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let reference = metadata::read_info(path).unwrap_or_else(|_| Reference {
+            title: "Unknown".to_string(),
+            authors: vec![],
+            year: None,
+            doi: None,
+            arxiv: None,
+            journal: None,
+            tags: vec![],
+            files: vec![],
+            r#abstract: None,
+        });
+        let score = metadata_score_ref(&reference);
+        let has_pdf = path.read_dir().map(|rd| rd.flatten().any(|e| {
+            e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        })).unwrap_or(false);
+        Self { path: path.to_path_buf(), dir_name, reference, score, has_pdf }
+    }
+}
+
+fn metadata_score_ref(r: &Reference) -> u32 {
+    let mut score = 0u32;
+    if !r.title.is_empty() { score += 1; }
+    if !r.authors.is_empty() { score += 1; }
+    if r.year.is_some() && r.year != Some(0) { score += 1; }
+    if r.doi.is_some() { score += 1; }
+    if r.arxiv.is_some() { score += 1; }
+    if r.journal.is_some() { score += 1; }
+    if !r.tags.is_empty() { score += 1; }
+    if !r.files.is_empty() { score += 1; }
+    if r.r#abstract.is_some() { score += 1; }
+    score
+}
+
+fn find_duplicate_groups(library: &Path) -> Result<Vec<Vec<PathBuf>>> {
+    use std::collections::{HashMap, HashSet};
+
+    let dirs = storage::list_ref_dirs(library)?;
+    let mut by_title: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut by_doi: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for dir in &dirs {
+        let r = match metadata::read_info(dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let normalized_title = r.title.trim().to_lowercase();
+        if !normalized_title.is_empty() {
+            by_title.entry(normalized_title).or_default().push(dir.clone());
+        }
+
+        if let Some(ref doi) = r.doi {
+            let normalized_doi = doi.trim().to_lowercase();
+            if !normalized_doi.is_empty() {
+                by_doi.entry(normalized_doi).or_default().push(dir.clone());
+            }
+        }
+    }
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+
+    for paths in by_title.values() {
+        if paths.len() > 1 {
+            let group: Vec<_> = paths.iter().filter(|p| !seen.contains(*p)).cloned().collect();
+            if group.len() > 1 {
+                for p in &group {
+                    seen.insert(p.clone());
+                }
+                groups.push(group);
+            }
+        }
+    }
+
+    for paths in by_doi.values() {
+        if paths.len() > 1 {
+            let group: Vec<_> = paths.iter().filter(|p| !seen.contains(*p)).cloned().collect();
+            if group.len() > 1 {
+                for p in &group {
+                    seen.insert(p.clone());
+                }
+                groups.push(group);
+            }
+        }
+    }
+
+    Ok(groups)
+}
+
+fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: usize, group_idx: usize, total_groups: usize) {
+    let t = theme;
+    let s_text = Style::default().fg(t.text);
+    let s_dim = Style::default().fg(t.text_dim);
+    let s_muted = Style::default().fg(t.text_muted);
+    let s_accent = Style::default().fg(t.accent);
+
+    let area = f.area();
+
+    let chunks = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ]).split(area);
+
+    let left = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ]).split(chunks[0]);
+
+    // Header
+    let title = &entries[0].reference.title;
+    let header = Line::from(vec![
+        Span::styled(format!(" [{}/{}] ", group_idx + 1, total_groups), s_dim),
+        Span::styled(truncate_ellipsis(title, left[0].width.saturating_sub(12) as usize), s_text),
+    ]);
+    f.render_widget(Paragraph::new(header), left[0]);
+
+    // List of entries
+    let items: Vec<ListItem> = entries.iter().enumerate().map(|(i, e)| {
+        let marker = if i == selected { "> " } else { "  " };
+        let pdf_indicator = if e.has_pdf { " [PDF]" } else { "" };
+        let label = format!("{}{}{} ({}/9)", marker, e.dir_name, pdf_indicator, e.score);
+        let style = if i == selected { s_accent.add_modifier(Modifier::BOLD) } else { s_dim };
+        ListItem::new(Span::styled(label, style))
+    }).collect();
+
+    f.render_widget(
+        List::new(items).block(Block::default().borders(Borders::TOP).border_style(s_muted)),
+        left[1],
+    );
+
+    // Footer
+    let footer = Line::from(vec![
+        Span::styled(" enter", s_accent),
+        Span::styled("=keep  ", s_dim),
+        Span::styled("s", s_accent),
+        Span::styled("=skip  ", s_dim),
+        Span::styled("q", s_accent),
+        Span::styled("=quit", s_dim),
+    ]);
+    f.render_widget(Paragraph::new(footer), left[2]);
+
+    // Preview of selected entry
+    let entry = &entries[selected];
+    let r = &entry.reference;
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(Span::styled(&r.title, s_text.add_modifier(Modifier::BOLD))));
+    lines.push(Line::default());
+
+    if !r.authors.is_empty() {
+        lines.push(Line::from(Span::styled(r.authors.join(", "), s_accent)));
+    }
+    if let Some(year) = r.year {
+        lines.push(Line::from(Span::styled(format!("{}", year), s_dim)));
+    }
+    if let Some(ref journal) = r.journal {
+        lines.push(Line::from(Span::styled(journal.as_str(), s_dim)));
+    }
+    lines.push(Line::default());
+
+    if let Some(ref doi) = r.doi {
+        lines.push(Line::from(vec![
+            Span::styled("DOI: ", s_muted),
+            Span::styled(doi.as_str(), s_dim),
+        ]));
+    }
+    if let Some(ref arxiv) = r.arxiv {
+        lines.push(Line::from(vec![
+            Span::styled("arXiv: ", s_muted),
+            Span::styled(arxiv.as_str(), s_dim),
+        ]));
+    }
+    if !r.tags.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Tags: ", s_muted),
+            Span::styled(r.tags.join(", "), s_dim),
+        ]));
+    }
+    if !r.files.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Files: ", s_muted),
+            Span::styled(r.files.join(", "), s_dim),
+        ]));
+    }
+
+    if let Some(ref abs) = r.r#abstract {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(abs.as_str(), s_dim)));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::LEFT).border_style(s_muted))
+            .wrap(Wrap { trim: false }),
+        chunks[1],
+    );
 }

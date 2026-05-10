@@ -6,12 +6,12 @@ A fast, opinionated reference manager for the terminal.
 
 - **Filesystem is truth.** Each reference is a directory containing a PDF and an `info.toml` metadata file. SQLite is a disposable search index.
 - **Opinionated defaults.** Works out of the box with zero configuration.
-- **Composable.** Pipe-friendly output. Built-in [fzf](https://github.com/junegunn/fzf) integration for interactive browsing.
+- **Composable.** Pipe-friendly output. Built-in TUI for interactive browsing.
 - **Fast.** Rust + SQLite FTS5. No startup tax.
 
 ## Install
 
-Requires Rust and [fzf](https://github.com/junegunn/fzf).
+Requires Rust.
 
 ```
 cargo install --path .
@@ -26,7 +26,7 @@ just install
 ## Usage
 
 ```
-carina                          # browse library in fzf
+carina                          # browse library
 carina jepa                     # browse with "jepa" pre-filled
 carina add 1706.03762           # import by arXiv ID (fetches metadata + PDF)
 carina add 10.1038/nature14539  # import by DOI (fetches metadata)
@@ -100,7 +100,7 @@ t = [":insert-output carina cite --format typst", ":redraw"]
 l = [":insert-output carina cite --format latex", ":redraw"]
 ```
 
-`Space r t` in normal mode opens the picker and inserts a Typst citation at the cursor.
+`Space r t` in normal mode opens Carina and inserts a Typst citation at the cursor.
 
 ## Smart import
 
