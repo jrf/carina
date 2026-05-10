@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::cursor::Show;
+use crossterm::style::ResetColor;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -42,24 +44,43 @@ pub struct App {
     tag_filter: Option<String>,
     all_tags: Vec<String>,
     tag_popup: Option<TagPopup>,
+    theme_popup: Option<ThemePopup>,
     layout: LayoutMode,
-    last_insert_char: Option<std::time::Instant>,
+    flash: Option<(String, std::time::Instant)>,
+    preview_scroll: u16,
+    show_help: bool,
+    list_height: usize,
 }
 
 struct TagPopup {
     filter: String,
     filtered_tags: Vec<String>,
+    counts: std::collections::BTreeMap<String, usize>,
+    total: usize,
     selected: usize,
+    scroll: usize,
+    prev_tag_filter: Option<String>,
 }
 
 impl TagPopup {
-    fn new(all_tags: &[String]) -> Self {
+    fn new(all_tags: &[String], entries: &[Entry], current_tag_filter: &Option<String>) -> Self {
+        let mut counts = std::collections::BTreeMap::new();
+        for e in entries {
+            for tag in &e.reference.tags {
+                *counts.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        let total = entries.len();
         let mut tags = vec!["(all)".to_string()];
         tags.extend(all_tags.iter().cloned());
         Self {
             filter: String::new(),
             filtered_tags: tags,
+            counts,
+            total,
             selected: 0,
+            scroll: 0,
+            prev_tag_filter: current_tag_filter.clone(),
         }
     }
 
@@ -77,6 +98,21 @@ impl TagPopup {
         }
     }
 
+    fn count_for(&self, tag: &str) -> usize {
+        if tag == "(all)" {
+            self.total
+        } else {
+            self.counts.get(tag).copied().unwrap_or(0)
+        }
+    }
+
+    fn selected_as_filter(&self) -> Option<String> {
+        match self.selected_tag() {
+            Some("(all)") | None => None,
+            Some(t) => Some(t.to_string()),
+        }
+    }
+
     fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
     }
@@ -87,8 +123,67 @@ impl TagPopup {
         }
     }
 
+    fn page_down(&mut self) {
+        if !self.filtered_tags.is_empty() {
+            self.selected = (self.selected + 20).min(self.filtered_tags.len() - 1);
+        }
+    }
+
+    fn page_up(&mut self) {
+        self.selected = self.selected.saturating_sub(20);
+    }
+
+    fn clamp_scroll(&mut self, visible: usize) {
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + visible {
+            self.scroll = self.selected - visible + 1;
+        }
+    }
+
     fn selected_tag(&self) -> Option<&str> {
         self.filtered_tags.get(self.selected).map(|s| s.as_str())
+    }
+}
+
+struct ThemePopup {
+    names: Vec<String>,
+    selected: usize,
+}
+
+impl ThemePopup {
+    fn new() -> Self {
+        let mut names = vec!["default".to_string()];
+        let theme_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("carina")
+            .join("themes");
+        if let Ok(entries) = std::fs::read_dir(&theme_dir) {
+            let mut found: Vec<String> = entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.strip_suffix(".toml").map(|s| s.to_string())
+                })
+                .collect();
+            found.sort();
+            names.extend(found);
+        }
+        Self { names, selected: 0 }
+    }
+
+    fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        if !self.names.is_empty() {
+            self.selected = (self.selected + 1).min(self.names.len() - 1);
+        }
+    }
+
+    fn selected_name(&self) -> Option<&str> {
+        self.names.get(self.selected).map(|s| s.as_str())
     }
 }
 
@@ -166,6 +261,8 @@ fn run_app(mut app: App) -> Result<()> {
         let _ = terminal::disable_raw_mode();
         if let Ok(mut f) = File::options().write(true).open("/dev/tty") {
             let _ = f.execute(LeaveAlternateScreen);
+            let _ = f.execute(ResetColor);
+            let _ = f.execute(Show);
         }
         prev_hook(info);
     }));
@@ -175,11 +272,14 @@ fn run_app(mut app: App) -> Result<()> {
 
     let backend = CrosstermBackend::new(BufWriter::new(tty.try_clone()?));
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     let result = run_event_loop(&mut terminal, &mut app, &mut tty_ctl);
 
     terminal::disable_raw_mode()?;
     tty_ctl.execute(LeaveAlternateScreen)?;
+    tty_ctl.execute(ResetColor)?;
+    tty_ctl.execute(Show)?;
 
     if let Some(output) = app.pending_output.take() {
         print!("{}", output);
@@ -197,31 +297,97 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
             return Ok(());
         }
 
+        let timeout = if app.flash.is_some() {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+        if !event::poll(timeout)? {
+            if app.flash_message().is_none() {
+                app.flash = None;
+            }
+            continue;
+        }
         if let Event::Key(key) = event::read()? {
+            if app.show_help {
+                app.show_help = false;
+                continue;
+            }
+
             if app.tag_popup.is_some() {
-                match key.code {
-                    KeyCode::Esc => { app.tag_popup = None; }
-                    KeyCode::Up => { app.tag_popup.as_mut().unwrap().move_up(); }
-                    KeyCode::Down => { app.tag_popup.as_mut().unwrap().move_down(); }
-                    KeyCode::Backspace => {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _) => {
+                        let prev = app.tag_popup.as_ref().unwrap().prev_tag_filter.clone();
+                        app.tag_popup = None;
+                        app.tag_filter = prev;
+                        app.rebuild_filter();
+                    }
+                    (KeyCode::Up, _) => {
+                        app.tag_popup.as_mut().unwrap().move_up();
+                        app.tag_filter = app.tag_popup.as_ref().unwrap().selected_as_filter();
+                        app.rebuild_filter();
+                    }
+                    (KeyCode::Down, _) => {
+                        app.tag_popup.as_mut().unwrap().move_down();
+                        app.tag_filter = app.tag_popup.as_ref().unwrap().selected_as_filter();
+                        app.rebuild_filter();
+                    }
+                    (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                        app.tag_popup.as_mut().unwrap().page_down();
+                        app.tag_filter = app.tag_popup.as_ref().unwrap().selected_as_filter();
+                        app.rebuild_filter();
+                    }
+                    (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                        app.tag_popup.as_mut().unwrap().page_up();
+                        app.tag_filter = app.tag_popup.as_ref().unwrap().selected_as_filter();
+                        app.rebuild_filter();
+                    }
+                    (KeyCode::Backspace, _) => {
                         let popup = app.tag_popup.as_mut().unwrap();
                         popup.filter.pop();
                         popup.rebuild(&app.all_tags);
+                        app.tag_filter = app.tag_popup.as_ref().unwrap().selected_as_filter();
+                        app.rebuild_filter();
                     }
-                    KeyCode::Char(c) => {
+                    (KeyCode::Char(c), _) => {
                         let popup = app.tag_popup.as_mut().unwrap();
                         popup.filter.push(c);
                         popup.rebuild(&app.all_tags);
+                        app.tag_filter = app.tag_popup.as_ref().unwrap().selected_as_filter();
+                        app.rebuild_filter();
+                    }
+                    (KeyCode::Enter, _) => {
+                        app.tag_popup = None;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            if app.theme_popup.is_some() {
+                match key.code {
+                    KeyCode::Esc => { app.theme_popup = None; }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.theme_popup.as_mut().unwrap().move_up();
+                        if let Some(name) = app.theme_popup.as_ref().unwrap().selected_name() {
+                            let theme_name = if name == "default" { None } else { Some(name) };
+                            app.theme = theme::load_theme(theme_name);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.theme_popup.as_mut().unwrap().move_down();
+                        if let Some(name) = app.theme_popup.as_ref().unwrap().selected_name() {
+                            let theme_name = if name == "default" { None } else { Some(name) };
+                            app.theme = theme::load_theme(theme_name);
+                        }
                     }
                     KeyCode::Enter => {
-                        let tag = app.tag_popup.as_ref().unwrap().selected_tag()
+                        let name = app.theme_popup.as_ref().unwrap().selected_name()
                             .map(|s| s.to_string());
-                        app.tag_popup = None;
-                        match tag.as_deref() {
-                            Some("(all)") | None => { app.tag_filter = None; }
-                            Some(t) => { app.tag_filter = Some(t.to_string()); }
+                        app.theme_popup = None;
+                        if let Some(ref n) = name {
+                            app.flash = Some((format!("Theme: {}", n), std::time::Instant::now()));
                         }
-                        app.rebuild_filter();
                     }
                     _ => {}
                 }
@@ -232,37 +398,27 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                 InputMode::Insert => match (key.code, key.modifiers) {
                     (KeyCode::Esc, _) => {
                         app.input_mode = InputMode::Normal;
-                        app.last_insert_char = None;
                     }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
 
-                    (KeyCode::Char('k'), KeyModifiers::NONE)
-                        if app.last_insert_char.is_some_and(|t| t.elapsed().as_millis() < 500)
-                            && app.filter.ends_with('j') =>
-                    {
-                        app.filter.pop();
-                        app.rebuild_filter();
-                        app.input_mode = InputMode::Normal;
-                        app.last_insert_char = None;
-                    }
                     (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                        app.last_insert_char = Some(std::time::Instant::now());
                         app.filter.push(c);
                         app.rebuild_filter();
                     }
                     (KeyCode::Backspace, _) => {
                         app.filter.pop();
                         app.rebuild_filter();
-                        app.last_insert_char = None;
                     }
 
                     (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => app.move_up(),
                     (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => app.move_down(),
-                    (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.half_page_down(),
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.half_page_up(),
                     (KeyCode::Char('f'), KeyModifiers::CONTROL) => app.page_down(),
+                    (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
 
                     (KeyCode::Tab, _) => {
-                        app.tag_popup = Some(TagPopup::new(&app.all_tags));
+                        app.tag_popup = Some(TagPopup::new(&app.all_tags, &app.entries, &app.tag_filter));
                     }
 
                     (KeyCode::Enter, _) => {
@@ -288,15 +444,25 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     (KeyCode::Char('k'), KeyModifiers::NONE)
                     | (KeyCode::Up, _)
                     | (KeyCode::Char('p'), KeyModifiers::CONTROL) => app.move_up(),
-                    (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.half_page_down(),
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.half_page_up(),
                     (KeyCode::Char('f'), KeyModifiers::CONTROL) => app.page_down(),
+                    (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
                     (KeyCode::Char('g'), KeyModifiers::NONE) => app.move_to_top(),
                     (KeyCode::Char('G'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         app.move_to_bottom();
                     }
 
-                    (KeyCode::Tab, _) => {
-                        app.tag_popup = Some(TagPopup::new(&app.all_tags));
+                    (KeyCode::Char('t'), KeyModifiers::NONE) => {
+                        app.tag_popup = Some(TagPopup::new(&app.all_tags, &app.entries, &app.tag_filter));
+                    }
+                    (KeyCode::Char('T'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        app.theme_popup = Some(ThemePopup::new());
+                    }
+                    (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                        app.filter.clear();
+                        app.tag_filter = None;
+                        app.rebuild_filter();
                     }
 
                     (KeyCode::Enter, _) => {
@@ -307,6 +473,19 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     }
                     (KeyCode::Char('y'), KeyModifiers::NONE) => {
                         app.action_copy_bib()?;
+                    }
+                    (KeyCode::Char('o'), KeyModifiers::NONE) => {
+                        app.action_open_url();
+                    }
+
+                    (KeyCode::Char('J'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        app.preview_scroll = app.preview_scroll.saturating_add(3);
+                    }
+                    (KeyCode::Char('K'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        app.preview_scroll = app.preview_scroll.saturating_sub(3);
+                    }
+                    (KeyCode::Char('?'), _) => {
+                        app.show_help = true;
                     }
 
                     _ => {}
@@ -375,8 +554,12 @@ impl App {
             tag_filter: None,
             all_tags,
             tag_popup: None,
+            theme_popup: None,
             layout: LayoutMode::from_config(config.layout.as_deref()),
-            last_insert_char: None,
+            flash: None,
+            preview_scroll: 0,
+            show_help: false,
+            list_height: 20,
         };
 
         if !app.filter.is_empty() {
@@ -426,6 +609,7 @@ impl App {
         } else {
             self.list_state.select(Some(0));
         }
+        self.preview_scroll = 0;
     }
 
     fn selected_entry(&self) -> Option<&Entry> {
@@ -443,6 +627,7 @@ impl App {
             Some(i) => i - 1,
         };
         self.list_state.select(Some(i));
+        self.preview_scroll = 0;
     }
 
     fn move_down(&mut self) {
@@ -455,34 +640,55 @@ impl App {
             None => 0,
         };
         self.list_state.select(Some(i));
+        self.preview_scroll = 0;
     }
 
-    fn page_up(&mut self) {
+    fn scroll_up(&mut self, lines: usize) {
         if self.filtered_indices.is_empty() {
             return;
         }
         let i = self.list_state.selected().unwrap_or(0);
-        self.list_state.select(Some(i.saturating_sub(20)));
+        self.list_state.select(Some(i.saturating_sub(lines)));
+        self.preview_scroll = 0;
     }
 
-    fn page_down(&mut self) {
+    fn scroll_down(&mut self, lines: usize) {
         if self.filtered_indices.is_empty() {
             return;
         }
         let i = self.list_state.selected().unwrap_or(0);
         let max = self.filtered_indices.len() - 1;
-        self.list_state.select(Some((i + 20).min(max)));
+        self.list_state.select(Some((i + lines).min(max)));
+        self.preview_scroll = 0;
+    }
+
+    fn half_page_up(&mut self) {
+        self.scroll_up(self.list_height / 2);
+    }
+
+    fn half_page_down(&mut self) {
+        self.scroll_down(self.list_height / 2);
+    }
+
+    fn page_up(&mut self) {
+        self.scroll_up(self.list_height);
+    }
+
+    fn page_down(&mut self) {
+        self.scroll_down(self.list_height);
     }
 
     fn move_to_top(&mut self) {
         if !self.filtered_indices.is_empty() {
             self.list_state.select(Some(0));
+            self.preview_scroll = 0;
         }
     }
 
     fn move_to_bottom(&mut self) {
         if !self.filtered_indices.is_empty() {
             self.list_state.select(Some(self.filtered_indices.len() - 1));
+            self.preview_scroll = 0;
         }
     }
 
@@ -565,7 +771,7 @@ impl App {
         Ok(())
     }
 
-    fn action_copy_bib(&self) -> Result<()> {
+    fn action_copy_bib(&mut self) -> Result<()> {
         let entry = match self.selected_entry() {
             Some(e) => e,
             None => return Ok(()),
@@ -605,7 +811,32 @@ impl App {
                 child.wait()
             })?;
 
+        self.flash = Some(("Copied BibTeX".to_string(), std::time::Instant::now()));
         Ok(())
+    }
+
+    fn flash_message(&self) -> Option<&str> {
+        self.flash.as_ref().and_then(|(msg, t)| {
+            if t.elapsed().as_secs() < 2 { Some(msg.as_str()) } else { None }
+        })
+    }
+
+    fn action_open_url(&mut self) {
+        let entry = match self.selected_entry() {
+            Some(e) => e,
+            None => return,
+        };
+        let r = &entry.reference;
+        let url = if let Some(ref doi) = r.doi {
+            format!("https://doi.org/{}", doi)
+        } else if let Some(ref arxiv) = r.arxiv {
+            format!("https://arxiv.org/abs/{}", arxiv)
+        } else {
+            self.flash = Some(("No DOI or arXiv ID".to_string(), std::time::Instant::now()));
+            return;
+        };
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+        self.flash = Some(("Opened in browser".to_string(), std::time::Instant::now()));
     }
 }
 
@@ -650,7 +881,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     let prompt = " search: ";
     let mut filter_spans = vec![Span::styled(prompt, s_muted)];
     if let Some(ref tag) = app.tag_filter {
-        filter_spans.push(Span::styled(format!("[{}] ", tag), s_warm));
+        filter_spans.push(Span::styled(format!("[{}] ", tag), s_accent));
     }
     if !app.filter.is_empty() {
         filter_spans.push(Span::styled(&app.filter, s_text));
@@ -668,6 +899,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // Paper list — year + author + title
+    app.list_height = left_chunks[1].height as usize;
     let list_width = left_chunks[1].width as usize;
     let prefix_width = 3 + 6 + 14; // highlight_symbol + year + author
     let title_max = list_width.saturating_sub(prefix_width);
@@ -712,19 +944,30 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Status bar
     let count = format!("  {}/{}", app.filtered_indices.len(), app.entries.len());
     let mode_indicator = match app.input_mode {
-        InputMode::Normal => Span::styled(" NOR ", s_accent.add_modifier(Modifier::BOLD)),
-        InputMode::Insert => Span::styled(" INS ", s_warm.add_modifier(Modifier::BOLD)),
+        InputMode::Normal => Span::styled(
+            " NOR ",
+            Style::default().fg(t.status_fg).bg(t.normal_bg).add_modifier(Modifier::BOLD),
+        ),
+        InputMode::Insert => Span::styled(
+            " INS ",
+            Style::default().fg(t.status_fg).bg(t.insert_bg).add_modifier(Modifier::BOLD),
+        ),
     };
     let mode_hint = match (app.input_mode, &app.mode) {
         (InputMode::Insert, _) => "  esc normal",
-        (InputMode::Normal, Mode::Browse) => "  / search  e edit  y bib  tab tags  q quit",
-        (InputMode::Normal, Mode::Cite { .. }) => "  / search  enter select  tab tags  q quit",
+        (InputMode::Normal, Mode::Browse) => "  / search  c clear  q quit",
+        (InputMode::Normal, Mode::Cite { .. }) => "  / search  c clear  q quit",
+    };
+    let right_status = if let Some(flash) = app.flash_message() {
+        Span::styled(format!("  {}", flash), s_warm)
+    } else {
+        Span::styled(mode_hint, s_muted)
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             mode_indicator,
             Span::styled(count, s_muted),
-            Span::styled(mode_hint, s_muted),
+            right_status,
         ])),
         left_chunks[2],
     );
@@ -761,12 +1004,12 @@ fn draw(f: &mut Frame, app: &mut App) {
             .split(inner[1]);
             ((), content[1])
         };
-        let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, accent: s_accent, warm: s_warm };
+        let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, accent: s_accent };
         draw_preview(f, app, content_area, &styles);
     }
 
     // Tag picker popup
-    if let Some(ref popup) = app.tag_popup {
+    if let Some(ref mut popup) = app.tag_popup {
         let area = f.area();
         let max_visible = 20.min(popup.filtered_tags.len());
         let height = max_visible as u16 + 4;
@@ -779,7 +1022,8 @@ fn draw(f: &mut Frame, app: &mut App) {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
+            .style(Style::default().bg(t.popup_bg))
+            .border_style(Style::default().fg(t.popup_border))
             .title(" Tags ")
             .title_style(s_accent.add_modifier(Modifier::BOLD));
         let inner = block.inner(popup_area);
@@ -802,33 +1046,164 @@ fn draw(f: &mut Frame, app: &mut App) {
         };
         f.render_widget(Paragraph::new(filter_line), popup_chunks[0]);
 
-        let scroll = if popup.selected >= max_visible {
-            popup.selected - max_visible + 1
-        } else {
-            0
-        };
+        popup.clamp_scroll(max_visible);
 
+        let inner_width = popup_chunks[1].width as usize;
         let lines: Vec<Line> = popup.filtered_tags.iter()
             .enumerate()
-            .skip(scroll)
+            .skip(popup.scroll)
             .take(max_visible)
             .map(|(i, tag)| {
                 let is_selected = i == popup.selected;
                 let prefix = if is_selected { " > " } else { "   " };
                 let style = if is_selected {
                     Style::default().fg(t.text).bg(t.selection).add_modifier(Modifier::BOLD)
-                } else if tag == "(all)" {
-                    s_dim
                 } else {
-                    Style::default().fg(t.warm)
+                    s_dim
                 };
-                Line::from(Span::styled(format!("{}{}", prefix, tag), style))
+                let count = popup.count_for(tag);
+                let count_str = format!("{} ", count);
+                let label = format!("{}{}", prefix, tag);
+                let pad = inner_width.saturating_sub(label.len() + count_str.len());
+                let count_style = if is_selected {
+                    Style::default().fg(t.text_dim).bg(t.selection)
+                } else {
+                    s_muted
+                };
+                Line::from(vec![
+                    Span::styled(label, style),
+                    Span::styled(" ".repeat(pad), style),
+                    Span::styled(count_str, count_style),
+                ])
             })
             .collect();
         f.render_widget(Paragraph::new(lines), popup_chunks[1]);
 
         let hint = Line::from(Span::styled(" enter select  esc cancel", s_muted));
         f.render_widget(Paragraph::new(hint), popup_chunks[2]);
+    }
+
+    // Theme picker popup
+    if let Some(ref popup) = app.theme_popup {
+        let area = f.area();
+        let max_visible = 12.min(popup.names.len());
+        let height = max_visible as u16 + 3;
+        let width = 30.min(area.width.saturating_sub(4));
+        let x = area.width.saturating_sub(width) / 2;
+        let y = area.height.saturating_sub(height) / 2;
+        let popup_area = ratatui::layout::Rect::new(x, y, width, height);
+
+        f.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().bg(t.popup_bg))
+            .border_style(Style::default().fg(t.popup_border))
+            .title(" Theme ")
+            .title_style(s_accent.add_modifier(Modifier::BOLD));
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        let popup_chunks = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+        let scroll = popup.selected.saturating_sub(max_visible - 1);
+
+        let lines: Vec<Line> = popup.names.iter()
+            .enumerate()
+            .skip(scroll)
+            .take(max_visible)
+            .map(|(i, name)| {
+                let is_selected = i == popup.selected;
+                let prefix = if is_selected { " > " } else { "   " };
+                let style = if is_selected {
+                    Style::default().fg(t.text).bg(t.selection).add_modifier(Modifier::BOLD)
+                } else {
+                    s_dim
+                };
+                Line::from(Span::styled(format!("{}{}", prefix, name), style))
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), popup_chunks[0]);
+
+        let hint = Line::from(Span::styled(" j/k preview  enter select  esc cancel", s_muted));
+        f.render_widget(Paragraph::new(hint), popup_chunks[1]);
+    }
+
+    // Help popup
+    if app.show_help {
+        let help_lines = vec![
+            ("", "Normal mode"),
+            ("j / k", "Move down / up"),
+            ("g / G", "Jump to top / bottom"),
+            ("^d / ^u", "Half-page down / up"),
+            ("^f / ^b", "Page down / up"),
+            ("J / K", "Scroll preview down / up"),
+            ("/ or i", "Enter search (insert mode)"),
+            ("enter", "Open PDF"),
+            ("e", "Edit info.toml"),
+            ("y", "Copy BibTeX"),
+            ("o", "Open DOI / arXiv in browser"),
+            ("c", "Clear search and tag filter"),
+            ("t", "Browse tags"),
+            ("T", "Switch theme"),
+            ("q / esc", "Quit"),
+            ("", ""),
+            ("", "Insert mode"),
+            ("esc", "Return to normal mode"),
+            ("^p / ^n", "Move up / down"),
+            ("^d / ^u", "Half-page down / up"),
+            ("^f / ^b", "Page down / up"),
+            ("enter", "Open PDF"),
+            ("tab", "Browse tags"),
+        ];
+
+        let height = help_lines.len() as u16 + 4;
+        let width = 56.min(area.width.saturating_sub(4));
+        let x = area.width.saturating_sub(width) / 2;
+        let y = area.height.saturating_sub(height) / 2;
+        let popup_area = ratatui::layout::Rect::new(x, y, width, height);
+
+        f.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().bg(t.popup_bg))
+            .border_style(Style::default().fg(t.popup_border))
+            .title(" Help ")
+            .title_style(s_accent.add_modifier(Modifier::BOLD));
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        let popup_chunks = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+        let key_width = 10;
+        let lines: Vec<Line> = help_lines.iter()
+            .map(|(key, desc)| {
+                if key.is_empty() {
+                    Line::from(Span::styled(
+                        format!(" {}", desc),
+                        s_accent.add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(vec![
+                        Span::styled(format!(" {:>width$}  ", key, width = key_width), s_accent),
+                        Span::styled(*desc, s_dim),
+                    ])
+                }
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), popup_chunks[0]);
+
+        let hint = Line::from(Span::styled(" press any key to close", s_muted));
+        f.render_widget(Paragraph::new(hint), popup_chunks[1]);
     }
 }
 
@@ -837,7 +1212,6 @@ struct Styles {
     dim: Style,
     muted: Style,
     accent: Style,
-    warm: Style,
 }
 
 fn draw_preview(
@@ -850,7 +1224,6 @@ fn draw_preview(
     let s_dim = s.dim;
     let s_muted = s.muted;
     let s_accent = s.accent;
-    let s_warm = s.warm;
     if let Some(entry) = app.selected_entry() {
         let r = &entry.reference;
         let mut lines: Vec<Line> = Vec::new();
@@ -865,7 +1238,7 @@ fn draw_preview(
         if r.year.is_some() || r.journal.is_some() {
             let mut parts = Vec::new();
             if let Some(year) = r.year {
-                parts.push(Span::styled(year.to_string(), s_warm));
+                parts.push(Span::styled(year.to_string(), s_dim));
             }
             if let Some(ref journal) = r.journal {
                 if r.year.is_some() {
@@ -899,7 +1272,7 @@ fn draw_preview(
         if !r.tags.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("tags  ", s_muted),
-                Span::styled(r.tags.join(", "), s_warm),
+                Span::styled(r.tags.join(", "), s_dim),
             ]));
         }
 
@@ -909,7 +1282,9 @@ fn draw_preview(
         }
 
         f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((app.preview_scroll, 0)),
             area,
         );
     } else {

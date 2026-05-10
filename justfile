@@ -23,9 +23,6 @@ clean:
     cargo clean
 
 install: release
-    cp target/release/carina ~/.local/bin/carina
-    codesign -s - ~/.local/bin/carina
-    mkdir -p ~/.config/carina/themes
-    cp themes/*.toml ~/.config/carina/themes/
+    @cp target/release/carina ~/.local/bin/carina
+    @if [ "$(uname)" = "Darwin" ]; then codesign -s - ~/.local/bin/carina; fi
     @echo "Installed → ~/.local/bin/carina"
-    @echo "Themes   → ~/.config/carina/themes/"
