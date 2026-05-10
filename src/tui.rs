@@ -24,6 +24,7 @@ use crate::metadata;
 use crate::model::Reference;
 use crate::storage;
 use crate::theme::{self, Theme};
+use crate::validate;
 
 #[derive(Clone, Copy, PartialEq)]
 enum SortMode {
@@ -84,6 +85,12 @@ pub struct App {
     enrich_preview: Option<EnrichPreview>,
     enrich_rx: Option<mpsc::Receiver<Vec<EnrichItem>>>,
     sort_mode: SortMode,
+    validate_popup: Option<ValidatePopup>,
+}
+
+struct ValidatePopup {
+    lines: Vec<String>,
+    scroll: u16,
 }
 
 type FieldDiff = (String, String, String); // (field, old, new)
@@ -394,6 +401,28 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                 continue;
             }
 
+            if let Some(ref mut vp) = app.validate_popup {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                        app.validate_popup = None;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        vp.scroll = vp.scroll.saturating_add(1);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        vp.scroll = vp.scroll.saturating_sub(1);
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        vp.scroll = vp.scroll.saturating_add(10);
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        vp.scroll = vp.scroll.saturating_sub(10);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             if app.add_input.is_some() {
                 match key.code {
                     KeyCode::Esc => { app.add_input = None; }
@@ -611,6 +640,9 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         app.action_reindex();
                     }
+                    (KeyCode::Char('V'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        app.action_validate();
+                    }
                     (KeyCode::Char('s'), KeyModifiers::NONE) => {
                         if app.filter.is_empty() {
                             app.sort_mode = app.sort_mode.next();
@@ -703,6 +735,7 @@ impl App {
             enrich_preview: None,
             enrich_rx: None,
             sort_mode: SortMode::Name,
+            validate_popup: None,
         };
 
         if !app.filter.is_empty() {
@@ -1037,6 +1070,21 @@ impl App {
             }
             Err(e) => {
                 self.flash = Some((format!("Reindex error: {}", e), std::time::Instant::now()));
+            }
+        }
+    }
+
+    fn action_validate(&mut self) {
+        let library = self.config.library_dir();
+        match validate::validate(&library, true) {
+            Ok(result) => {
+                self.reload_entries();
+                let mut lines = vec![result.summary(), String::new()];
+                lines.extend(result.issues);
+                self.validate_popup = Some(ValidatePopup { lines, scroll: 0 });
+            }
+            Err(e) => {
+                self.flash = Some((format!("Validate error: {}", e), std::time::Instant::now()));
             }
         }
     }
@@ -1735,6 +1783,35 @@ fn draw(f: &mut Frame, app: &mut App) {
         f.render_widget(Paragraph::new(hint), popup_chunks[1]);
     }
 
+    // Validate popup
+    if let Some(ref vp) = app.validate_popup {
+        let height = (vp.lines.len() as u16 + 4).min(area.height.saturating_sub(4));
+        let width = 60.min(area.width.saturating_sub(4));
+        let x = area.width.saturating_sub(width) / 2;
+        let y = area.height.saturating_sub(height) / 2;
+        let popup_area = ratatui::layout::Rect::new(x, y, width, height);
+
+        f.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().bg(t.popup_bg))
+            .border_style(Style::default().fg(t.popup_border))
+            .title(" Validate ")
+            .title_style(s_author.add_modifier(Modifier::BOLD));
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        let lines: Vec<Line> = vp.lines.iter()
+            .map(|l| Line::from(Span::styled(format!(" {}", l), s_dim)))
+            .collect();
+
+        f.render_widget(
+            Paragraph::new(lines).scroll((vp.scroll, 0)),
+            inner,
+        );
+    }
+
     // Help popup
     if app.show_help {
         let help_lines = vec![
@@ -1756,6 +1833,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             ("s", "Cycle sort (name/author/year/title)"),
             ("d", "Deduplicate library"),
             ("I", "Reindex library"),
+            ("V", "Validate library (auto-fix)"),
             ("c", "Clear search and tag filter"),
             ("t", "Browse tags"),
             ("T", "Switch theme"),

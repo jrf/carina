@@ -7,6 +7,7 @@ mod model;
 mod storage;
 mod theme;
 mod tui;
+mod validate;
 
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,12 @@ enum Command {
         #[arg(short, long)]
         force: bool,
     },
+    /// Validate library integrity (missing PDFs, junk files, temp names)
+    Validate {
+        /// Automatically fix issues (rename temp files, remove non-PDFs)
+        #[arg(short, long)]
+        fix: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -67,6 +74,7 @@ fn main() -> Result<()> {
         Some(Command::Cite { format }) => tui::cite(&config, &library, &format),
         Some(Command::Reindex) => cmd_reindex(&library),
         Some(Command::ImportPolaris { force }) => import_polaris::run(&library, force),
+        Some(Command::Validate { fix }) => validate::run(&library, fix),
     }
 }
 
