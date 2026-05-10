@@ -8,6 +8,7 @@ pub struct Config {
     pub library: Option<String>,
     pub editor: Option<String>,
     pub reader: Option<String>,
+    pub picker: Option<String>,
 }
 
 impl Config {
@@ -21,6 +22,7 @@ impl Config {
                 library: None,
                 editor: None,
                 reader: None,
+                picker: None,
             })
         }
     }
@@ -50,6 +52,13 @@ impl Config {
             .ok()
             .or_else(|| self.reader.clone())
             .unwrap_or_else(|| "open".to_string())
+    }
+
+    pub fn picker(&self) -> String {
+        std::env::var("CARINA_PICKER")
+            .ok()
+            .or_else(|| self.picker.clone())
+            .unwrap_or_else(|| "fzf".to_string())
     }
 
     fn config_path() -> PathBuf {

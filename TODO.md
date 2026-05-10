@@ -2,15 +2,12 @@
 
 ## Now
 
-- [ ] SQLite index: schema, indexing from filesystem, `carina reindex` #feature
-- [ ] Search: FTS5 across title, authors, abstract #feature
+- [ ] PDF full-text indexing into FTS5 #feature
+- [ ] URL import: `carina add <url>` downloads PDF from arbitrary URLs #feature
+- [ ] `carina tag` command for quick tagging without opening editor #improvement
 
 ## Next
 
-- [ ] PDF full-text indexing into FTS5 #feature
-- [ ] URL import: `carina add <url>` downloads PDF from arbitrary URLs #feature
-- [ ] Shell completions: fish, bash, zsh #chore
-- [ ] `carina tag` command for quick tagging without opening editor #improvement
 - [ ] `carina related` via Semantic Scholar API #feature
 
 ## Later
@@ -36,3 +33,6 @@
 - [x] BibTeX export: `carina bib <query>` #feature
 - [x] fzf browser: `carina` launches interactive picker with preview and keybindings #feature
 - [x] Import from Polaris: `carina import-polaris` with `--force` flag #feature
+- [x] SQLite FTS5 index: schema, indexing, `carina reindex` #feature
+- [x] Picker-agnostic: configurable via `$CARINA_PICKER` or config.toml #improvement
+- [x] Shell completions: `carina completions {fish,bash,zsh}` #chore

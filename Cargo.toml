@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 dirs = "6"
 lopdf = "0.34"
 quick-xml = "0.37"

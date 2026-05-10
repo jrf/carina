@@ -9,7 +9,7 @@ mod storage;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use config::Config;
 
@@ -67,8 +67,17 @@ enum Command {
         #[arg(short, long, default_value = "plain")]
         format: String,
     },
+    /// Find duplicate references in the library
+    Duplicates,
+    /// Interactively resolve duplicates (pick which to keep)
+    Dedup,
     /// Rebuild the search index from filesystem
     Reindex,
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate for (bash, fish, zsh)
+        shell: clap_complete::Shell,
+    },
     /// Import papers from a Polaris library
     ImportPolaris {
         /// Overwrite metadata for existing entries
@@ -96,13 +105,20 @@ fn main() -> Result<()> {
         Some(Command::Open { reader, query }) => cmd_open(&config, &library, &query, reader.as_deref()),
         Some(Command::Edit { query }) => cmd_edit(&config, &library, &query),
         Some(Command::Bib { query }) => cmd_bib(&library, &query),
-        Some(Command::Cite { format }) => cmd_cite(&library, &format),
+        Some(Command::Cite { format }) => cmd_cite(&config, &library, &format),
+        Some(Command::Duplicates) => cmd_duplicates(&library),
+        Some(Command::Dedup) => cmd_dedup(&config, &library),
         Some(Command::Reindex) => cmd_reindex(&library),
+        Some(Command::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "carina", &mut std::io::stdout());
+            Ok(())
+        }
         Some(Command::ImportPolaris { force }) => import_polaris::run(&library, force),
     }
 }
 
-fn launch_fzf(library: &Path, entries: &[(String, String)], initial_query: Option<&str>) -> Result<()> {
+fn launch_fzf(config: &Config, library: &Path, entries: &[(String, String)], initial_query: Option<&str>) -> Result<()> {
     if entries.is_empty() {
         println!("No results.");
         return Ok(());
@@ -145,6 +161,7 @@ fn launch_fzf(library: &Path, entries: &[(String, String)], initial_query: Optio
         format!("--bind=enter:execute({})+abort", open_cmd),
         format!("--bind=ctrl-e:execute({})", edit_cmd),
         format!("--bind=ctrl-y:execute-silent({})", bib_cmd),
+        "--bind=ctrl-f:page-down,ctrl-b:page-up".to_string(),
         "--header=enter: open │ ctrl-e: edit │ ctrl-y: copy bib".to_string(),
         "--no-mouse".to_string(),
     ];
@@ -153,7 +170,8 @@ fn launch_fzf(library: &Path, entries: &[(String, String)], initial_query: Optio
         args.push(format!("--query={}", q));
     }
 
-    let status = std::process::Command::new("fzf")
+    let picker = config.picker();
+    let status = std::process::Command::new(&picker)
         .args(&args)
         .env("CARINA_LIBRARY", library.as_os_str())
         .stdin(std::process::Stdio::piped())
@@ -170,11 +188,11 @@ fn launch_fzf(library: &Path, entries: &[(String, String)], initial_query: Optio
 
     match status {
         Ok(s) if s.success() || s.code() == Some(130) => Ok(()),
-        Ok(s) => anyhow::bail!("fzf exited with status {}", s),
+        Ok(s) => anyhow::bail!("{} exited with status {}", picker, s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            anyhow::bail!("fzf not found — install it with `brew install fzf`")
+            anyhow::bail!("{} not found — install it with your package manager", picker)
         }
-        Err(e) => Err(e).context("Failed to launch fzf"),
+        Err(e) => Err(e).with_context(|| format!("Failed to launch {}", picker)),
     }
 }
 
@@ -275,7 +293,7 @@ fn add_from_file(library: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_search(_config: &Config, library: &Path, query: &[String]) -> Result<()> {
+fn cmd_search(config: &Config, library: &Path, query: &[String]) -> Result<()> {
     let dirs = storage::list_ref_dirs(library)?;
     if dirs.is_empty() {
         println!("Library is empty. Use `carina add <file.pdf>` to import a paper.");
@@ -310,10 +328,10 @@ fn cmd_search(_config: &Config, library: &Path, query: &[String]) -> Result<()> 
         Some(query.join(" "))
     };
 
-    launch_fzf(library, &entries, initial.as_deref())
+    launch_fzf(config, library, &entries, initial.as_deref())
 }
 
-fn cmd_cite(library: &Path, format: &str) -> Result<()> {
+fn cmd_cite(config: &Config, library: &Path, format: &str) -> Result<()> {
     let dirs = storage::list_ref_dirs(library)?;
     if dirs.is_empty() {
         anyhow::bail!("Library is empty");
@@ -347,7 +365,8 @@ fn cmd_cite(library: &Path, format: &str) -> Result<()> {
 
     let input = lines.join("\n");
 
-    let output = std::process::Command::new("fzf")
+    let picker = config.picker();
+    let output = std::process::Command::new(&picker)
         .args([
             "--delimiter=\t",
             "--with-nth=2..",
@@ -388,6 +407,249 @@ fn cmd_cite(library: &Path, format: &str) -> Result<()> {
     Ok(())
 }
 
+fn cmd_duplicates(library: &Path) -> Result<()> {
+    use std::collections::HashMap;
+
+    let dirs = storage::list_ref_dirs(library)?;
+    let mut by_title: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut by_doi: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for dir in &dirs {
+        let r = match metadata::read_info(dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let normalized_title = r.title.trim().to_lowercase();
+        if !normalized_title.is_empty() {
+            by_title.entry(normalized_title).or_default().push(dir.clone());
+        }
+
+        if let Some(ref doi) = r.doi {
+            let normalized_doi = doi.trim().to_lowercase();
+            if !normalized_doi.is_empty() {
+                by_doi.entry(normalized_doi).or_default().push(dir.clone());
+            }
+        }
+    }
+
+    let mut found = false;
+
+    let mut title_dupes: Vec<_> = by_title.iter().filter(|(_, v)| v.len() > 1).collect();
+    title_dupes.sort_by_key(|(title, _)| (*title).clone());
+    for (title, paths) in &title_dupes {
+        if !found {
+            println!("Duplicates by title:");
+            found = true;
+        }
+        println!("  \"{}\"", title);
+        for p in paths.iter() {
+            println!("    {}", p.file_name().unwrap_or_default().to_string_lossy());
+        }
+    }
+
+    let mut doi_dupes: Vec<_> = by_doi.iter().filter(|(_, v)| v.len() > 1).collect();
+    doi_dupes.sort_by_key(|(doi, _)| (*doi).clone());
+    if !doi_dupes.is_empty() {
+        if found {
+            println!();
+        }
+        println!("Duplicates by DOI:");
+        found = true;
+        for (doi, paths) in &doi_dupes {
+            println!("  {}", doi);
+            for p in paths.iter() {
+                println!("    {}", p.file_name().unwrap_or_default().to_string_lossy());
+            }
+        }
+    }
+
+    if !found {
+        println!("No duplicates found.");
+    }
+
+    Ok(())
+}
+
+fn find_duplicate_groups(library: &Path) -> Result<Vec<Vec<PathBuf>>> {
+    use std::collections::{HashMap, HashSet};
+
+    let dirs = storage::list_ref_dirs(library)?;
+    let mut by_title: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut by_doi: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for dir in &dirs {
+        let r = match metadata::read_info(dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let normalized_title = r.title.trim().to_lowercase();
+        if !normalized_title.is_empty() {
+            by_title.entry(normalized_title).or_default().push(dir.clone());
+        }
+
+        if let Some(ref doi) = r.doi {
+            let normalized_doi = doi.trim().to_lowercase();
+            if !normalized_doi.is_empty() {
+                by_doi.entry(normalized_doi).or_default().push(dir.clone());
+            }
+        }
+    }
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+
+    for (_, paths) in &by_title {
+        if paths.len() > 1 {
+            let group: Vec<_> = paths.iter().filter(|p| !seen.contains(*p)).cloned().collect();
+            if group.len() > 1 {
+                for p in &group {
+                    seen.insert(p.clone());
+                }
+                groups.push(group);
+            }
+        }
+    }
+
+    for (_, paths) in &by_doi {
+        if paths.len() > 1 {
+            let group: Vec<_> = paths.iter().filter(|p| !seen.contains(*p)).cloned().collect();
+            if group.len() > 1 {
+                for p in &group {
+                    seen.insert(p.clone());
+                }
+                groups.push(group);
+            }
+        }
+    }
+
+    Ok(groups)
+}
+
+fn metadata_score(dir: &Path) -> u32 {
+    let r = match metadata::read_info(dir) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    let mut score = 0u32;
+    if !r.title.is_empty() { score += 1; }
+    if !r.authors.is_empty() { score += 1; }
+    if r.year.is_some() && r.year != Some(0) { score += 1; }
+    if r.doi.is_some() { score += 1; }
+    if r.arxiv.is_some() { score += 1; }
+    if r.journal.is_some() { score += 1; }
+    if !r.tags.is_empty() { score += 1; }
+    if !r.files.is_empty() { score += 1; }
+    if r.r#abstract.is_some() { score += 1; }
+    score
+}
+
+fn cmd_dedup(config: &Config, library: &Path) -> Result<()> {
+    let groups = find_duplicate_groups(library)?;
+
+    if groups.is_empty() {
+        println!("No duplicates found.");
+        return Ok(());
+    }
+
+    let trash_dir = library.join(".trash");
+    let mut removed = 0;
+
+    let carina_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("carina"));
+    let library_str = library.to_string_lossy();
+    let bin_str = carina_bin.to_string_lossy();
+
+    println!("Found {} duplicate groups. Pick which to KEEP for each.\n", groups.len());
+
+    for (i, group) in groups.iter().enumerate() {
+        let title = metadata::read_info(&group[0])
+            .map(|r| r.title)
+            .unwrap_or_else(|_| "Unknown".to_string());
+        println!("[{}/{}] \"{}\"", i + 1, groups.len(), title);
+
+        let input: String = group
+            .iter()
+            .map(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let score = metadata_score(p);
+                let has_pdf = p.read_dir().map(|rd| rd.flatten().any(|e| {
+                    e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                })).unwrap_or(false);
+                let indicators = format!("{}{}",
+                    if has_pdf { " [PDF]" } else { "" },
+                    format!(" ({}/9 fields)", score),
+                );
+                format!("{}\t{}{}", name, name, indicators)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let preview_cmd = format!(
+            "CARINA_LIBRARY={} {} show {{1}}",
+            shell_escape(&library_str), shell_escape(&bin_str)
+        );
+
+        let picker = config.picker();
+        let output = std::process::Command::new(&picker)
+            .args([
+                "--delimiter=\t",
+                "--with-nth=2..",
+                "--height=100%",
+                "--no-mouse",
+                "--header=Select entry to KEEP (others will be trashed)",
+                "--preview-window=right:50%:wrap",
+            ])
+            .arg(format!("--preview={}", preview_cmd))
+            .env("CARINA_LIBRARY", library.as_os_str())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.take() {
+                    let mut stdin = stdin;
+                    let _ = stdin.write_all(input.as_bytes());
+                    drop(stdin);
+                }
+                child.wait_with_output()
+            })
+            .with_context(|| format!("Failed to launch {}", picker))?;
+
+        if !output.status.success() {
+            println!("  Skipped.\n");
+            continue;
+        }
+
+        let selected = String::from_utf8_lossy(&output.stdout);
+        let keep_name = selected.split('\t').next().unwrap_or("").trim();
+        if keep_name.is_empty() {
+            println!("  Skipped.\n");
+            continue;
+        }
+
+        std::fs::create_dir_all(&trash_dir)?;
+
+        for dir in group {
+            let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if name != keep_name {
+                let dest = trash_dir.join(&name);
+                std::fs::rename(dir, &dest)
+                    .with_context(|| format!("Failed to move {} to trash", name))?;
+                println!("  Trashed: {}", name);
+                removed += 1;
+            }
+        }
+        println!("  Kept: {}\n", keep_name);
+    }
+
+    println!("Done. Removed {} duplicates (moved to .trash/)", removed);
+    if removed > 0 {
+        println!("Run `carina reindex` to update the search index.");
+    }
+    Ok(())
+}
+
 fn cmd_reindex(library: &Path) -> Result<()> {
     let idx = index::Index::open(library)?;
     let count = idx.reindex(library)?;
@@ -408,10 +670,10 @@ fn cmd_list(library: &Path, tag_filter: Option<&str>) -> Result<()> {
             Err(_) => continue,
         };
 
-        if let Some(tag) = tag_filter {
-            if !reference.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-                continue;
-            }
+        if let Some(tag) = tag_filter
+            && !reference.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+        {
+            continue;
         }
 
         let authors = if reference.authors.is_empty() {
