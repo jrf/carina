@@ -200,21 +200,20 @@ struct ThemePopup {
 
 impl ThemePopup {
     fn new() -> Self {
-        let mut names = vec!["default".to_string()];
+        let mut names = Vec::new();
         let theme_dir = dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("carina")
             .join("themes");
         if let Ok(entries) = std::fs::read_dir(&theme_dir) {
-            let mut found: Vec<String> = entries
+            names = entries
                 .flatten()
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
                     name.strip_suffix(".toml").map(|s| s.to_string())
                 })
                 .collect();
-            found.sort();
-            names.extend(found);
+            names.sort();
         }
         Self { names, selected: 0 }
     }
@@ -504,12 +503,7 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                         }
                     }
                     KeyCode::Enter => {
-                        let name = app.theme_popup.as_ref().unwrap().selected_name()
-                            .map(|s| s.to_string());
                         app.theme_popup = None;
-                        if let Some(ref n) = name {
-                            app.flash = Some((format!("Theme: {}", n), std::time::Instant::now()));
-                        }
                     }
                     _ => {}
                 }
@@ -598,6 +592,9 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     }
                     (KeyCode::Char('o'), KeyModifiers::NONE) => {
                         app.action_open_url();
+                    }
+                    (KeyCode::Char('p'), KeyModifiers::NONE) => {
+                        app.action_open_polaris();
                     }
                     (KeyCode::Char('a'), KeyModifiers::NONE) => {
                         app.add_input = Some(String::new());
@@ -1098,6 +1095,33 @@ impl App {
         self.flash = Some(("Opened in browser".to_string(), std::time::Instant::now()));
     }
 
+    fn action_open_polaris(&mut self) {
+        let entry = match self.selected_entry() {
+            Some(e) => e,
+            None => return,
+        };
+        let pdf = if let Some(f) = entry.reference.files.first() {
+            entry.dir.join(f)
+        } else {
+            match std::fs::read_dir(&entry.dir)
+                .ok()
+                .and_then(|rd| rd.flatten().find(|e| {
+                    e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                }))
+            {
+                Some(e) => e.path(),
+                None => {
+                    self.flash = Some(("No PDF found".to_string(), std::time::Instant::now()));
+                    return;
+                }
+            }
+        };
+        match std::process::Command::new("open").arg("-a").arg("Polaris").arg(&pdf).spawn() {
+            Ok(_) => self.flash = Some(("Opened in Polaris".to_string(), std::time::Instant::now())),
+            Err(e) => self.flash = Some((format!("Error: {}", e), std::time::Instant::now())),
+        }
+    }
+
     fn action_enrich_selected(&mut self) {
         if self.enrich_rx.is_some() { return; }
         let selected = match self.list_state.selected() {
@@ -1331,13 +1355,17 @@ fn draw(f: &mut Frame, app: &mut App) {
     let s_text = Style::default().fg(t.text);
     let s_dim = Style::default().fg(t.text_dim);
     let s_muted = Style::default().fg(t.text_muted);
-    let s_accent = Style::default().fg(t.accent);
-    let s_warm = Style::default().fg(t.warm);
+    let s_author = Style::default().fg(t.author);
+    let s_hl = Style::default().fg(t.highlight);
+    let s_link = Style::default().fg(t.link);
+    let s_date = Style::default().fg(t.date);
 
     let area = f.area();
     let resolved = app.layout.resolve(area.width, area.height);
 
-    let (list_area, preview_area) = match resolved {
+    let border_style = Style::default().fg(t.border);
+
+    let (left_col, preview_area) = match resolved {
         ResolvedLayout::Wide => {
             let chunks = Layout::horizontal([
                 Constraint::Percentage(50),
@@ -1356,18 +1384,25 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
     };
 
-    let border_style = Style::default().fg(t.border);
+    // Split left column: search bar (3 rows) + list
+    let left_parts = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .split(left_col);
+    let search_area = left_parts[0];
+    let list_area = left_parts[1];
 
-    // Build list block title from filter/add input
-    let list_title = if let Some(ref add_text) = app.add_input {
+    // Search / add bar
+    let search_content = if let Some(ref add_text) = app.add_input {
         Line::from(vec![
-            Span::styled(" add: ", s_warm),
+            Span::styled("add: ", s_hl),
             Span::styled(add_text.as_str(), s_text),
         ])
     } else {
-        let mut spans = vec![Span::styled(" search: ", s_muted)];
+        let mut spans = Vec::new();
         if let Some(ref tag) = app.tag_filter {
-            spans.push(Span::styled(format!("[{}] ", tag), s_accent));
+            spans.push(Span::styled(format!("[{}] ", tag), s_hl));
         }
         if !app.filter.is_empty() {
             spans.push(Span::styled(&app.filter, s_text));
@@ -1375,7 +1410,28 @@ fn draw(f: &mut Frame, app: &mut App) {
         Line::from(spans)
     };
 
-    // Status bar as bottom title
+    let search_title = Line::from(Span::styled(" Search ", s_hl));
+
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(search_title);
+    let search_inner = search_block.inner(search_area);
+    f.render_widget(search_block, search_area);
+    f.render_widget(Paragraph::new(search_content), search_inner);
+
+    // Cursor position for input
+    if app.add_input.is_some() {
+        let add_text = app.add_input.as_ref().unwrap();
+        let cursor_x = search_inner.x + "add: ".len() as u16 + add_text.len() as u16;
+        f.set_cursor_position((cursor_x, search_inner.y));
+    } else if app.input_mode == InputMode::Insert {
+        let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
+        let cursor_x = search_inner.x + tag_label_len as u16 + app.filter.len() as u16;
+        f.set_cursor_position((cursor_x, search_inner.y));
+    }
+
+    // Status bar as bottom title of list
     let count_str = format!(" {}/{} ", app.filtered_indices.len(), app.entries.len());
     let mode_indicator = match app.input_mode {
         InputMode::Normal => Span::styled(
@@ -1397,14 +1453,14 @@ fn draw(f: &mut Frame, app: &mut App) {
         Span::styled(count_str, s_muted),
     ];
     if let Some(flash) = app.flash_message() {
-        bottom_spans.push(Span::styled(format!(" {} ", flash), s_warm));
+        bottom_spans.push(Span::styled(format!(" {} ", flash), s_hl));
     } else {
         bottom_spans.push(Span::styled(mode_hint, s_muted));
     }
     let bottom_left = Line::from(bottom_spans);
 
-    let sort_right = if app.sort_mode != SortMode::Name {
-        Line::from(Span::styled(format!(" sort: {} ", app.sort_mode.label()), s_warm))
+    let sort_right = if app.sort_mode != SortMode::Name && app.filter.is_empty() {
+        Line::from(Span::styled(format!(" sort: {} ", app.sort_mode.label()), s_hl))
     } else {
         Line::default()
     };
@@ -1412,23 +1468,12 @@ fn draw(f: &mut Frame, app: &mut App) {
     let list_block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(list_title)
+        .title(Line::from(Span::styled(" Papers ", s_hl)))
         .title_bottom(bottom_left)
         .title_bottom(sort_right.alignment(ratatui::layout::Alignment::Right));
 
     let list_inner = list_block.inner(list_area);
     f.render_widget(list_block, list_area);
-
-    // Cursor position for input
-    if app.add_input.is_some() {
-        let add_text = app.add_input.as_ref().unwrap();
-        let cursor_x = list_area.x + 1 + " add: ".len() as u16 + add_text.len() as u16;
-        f.set_cursor_position((cursor_x, list_area.y));
-    } else if app.input_mode == InputMode::Insert {
-        let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
-        let cursor_x = list_area.x + 1 + " search: ".len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
-        f.set_cursor_position((cursor_x, list_area.y));
-    }
 
     // Paper list — year + author + title
     app.list_height = list_inner.height as usize;
@@ -1460,8 +1505,8 @@ fn draw(f: &mut Frame, app: &mut App) {
             let title = truncate_ellipsis(&r.title, title_max);
 
             ListItem::new(Line::from(vec![
-                Span::styled(year_str, s_muted),
-                Span::styled(author_str, s_accent),
+                Span::styled(year_str, s_date),
+                Span::styled(author_str, s_author),
                 Span::styled(title, s_text),
             ]))
         })
@@ -1476,18 +1521,19 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Preview pane
     if let Some(pane_area) = preview_area {
         let preview_title = app.selected_entry()
-            .map(|e| Line::from(Span::styled(format!(" {} ", e.dir_name), s_muted)))
+            .map(|e| Line::from(Span::styled(format!(" {} ", e.dir_name), s_hl)))
             .unwrap_or_default();
 
         let preview_block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(preview_title);
+            .title(preview_title)
+            .padding(ratatui::widgets::Padding::horizontal(1));
 
         let content_area = preview_block.inner(pane_area);
         f.render_widget(preview_block, pane_area);
 
-        let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, accent: s_accent, warm: s_warm };
+        let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, author: s_author, highlight: s_hl, link: s_link, date: s_date };
         draw_preview(f, app, content_area, &styles);
     }
 
@@ -1508,7 +1554,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             .style(Style::default().bg(t.popup_bg))
             .border_style(Style::default().fg(t.popup_border))
             .title(" Tags ")
-            .title_style(s_accent.add_modifier(Modifier::BOLD));
+            .title_style(s_author.add_modifier(Modifier::BOLD));
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
 
@@ -1523,7 +1569,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             Line::from(Span::styled(" type to filter...", s_muted))
         } else {
             Line::from(vec![
-                Span::styled(" > ", s_accent),
+                Span::styled(" > ", s_author),
                 Span::styled(&popup.filter, s_text),
             ])
         };
@@ -1583,7 +1629,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             .style(Style::default().bg(t.popup_bg))
             .border_style(Style::default().fg(t.popup_border))
             .title(" Theme ")
-            .title_style(s_accent.add_modifier(Modifier::BOLD));
+            .title_style(s_author.add_modifier(Modifier::BOLD));
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
 
@@ -1632,11 +1678,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         for (field, old_val, new_val) in &ep.diffs {
             lines.push(Line::from(Span::styled(
                 format!(" {}:", field),
-                s_accent.add_modifier(Modifier::BOLD),
+                s_author.add_modifier(Modifier::BOLD),
             )));
             if !old_val.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::styled("  - ", Style::default().fg(t.warm)),
+                    Span::styled("  - ", Style::default().fg(t.highlight)),
                     Span::styled(old_val.as_str(), s_dim),
                 ]));
             }
@@ -1660,7 +1706,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             .style(Style::default().bg(t.popup_bg))
             .border_style(Style::default().fg(t.popup_border))
             .title(header)
-            .title_style(s_accent.add_modifier(Modifier::BOLD));
+            .title_style(s_author.add_modifier(Modifier::BOLD));
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
 
@@ -1677,11 +1723,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         );
 
         let hint = Line::from(vec![
-            Span::styled(" enter/y", s_accent),
+            Span::styled(" enter/y", s_author),
             Span::styled("=apply  ", s_dim),
-            Span::styled("n/s", s_accent),
+            Span::styled("n/s", s_author),
             Span::styled("=skip  ", s_dim),
-            Span::styled("esc", s_accent),
+            Span::styled("esc", s_author),
             Span::styled("=cancel", s_dim),
         ]);
         f.render_widget(Paragraph::new(hint), popup_chunks[1]);
@@ -1701,6 +1747,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             ("e", "Edit info.toml"),
             ("y", "Copy BibTeX"),
             ("o", "Open DOI / arXiv in browser"),
+            ("p", "Open PDF in Polaris"),
             ("a", "Add paper (path, DOI, arXiv, URL)"),
             ("r", "Enrich selected (fetch metadata)"),
             ("R", "Enrich all with missing fields"),
@@ -1734,7 +1781,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             .style(Style::default().bg(t.popup_bg))
             .border_style(Style::default().fg(t.popup_border))
             .title(" Help ")
-            .title_style(s_accent.add_modifier(Modifier::BOLD));
+            .title_style(s_author.add_modifier(Modifier::BOLD));
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
 
@@ -1750,11 +1797,11 @@ fn draw(f: &mut Frame, app: &mut App) {
                 if key.is_empty() {
                     Line::from(Span::styled(
                         format!(" {}", desc),
-                        s_accent.add_modifier(Modifier::BOLD),
+                        s_author.add_modifier(Modifier::BOLD),
                     ))
                 } else {
                     Line::from(vec![
-                        Span::styled(format!(" {:>width$}  ", key, width = key_width), s_accent),
+                        Span::styled(format!(" {:>width$}  ", key, width = key_width), s_author),
                         Span::styled(*desc, s_dim),
                     ])
                 }
@@ -1771,8 +1818,10 @@ struct Styles {
     text: Style,
     dim: Style,
     muted: Style,
-    accent: Style,
-    warm: Style,
+    author: Style,
+    highlight: Style,
+    link: Style,
+    date: Style,
 }
 
 fn draw_preview(
@@ -1784,8 +1833,10 @@ fn draw_preview(
     let s_text = s.text;
     let s_dim = s.dim;
     let s_muted = s.muted;
-    let s_accent = s.accent;
-    let s_warm = s.warm;
+    let s_author = s.author;
+    let s_hl = s.highlight;
+    let s_link = s.link;
+    let s_date = s.date;
     if let Some(entry) = app.selected_entry() {
         let r = &entry.reference;
         let mut lines: Vec<Line> = Vec::new();
@@ -1800,7 +1851,7 @@ fn draw_preview(
         if r.year.is_some() || r.journal.is_some() {
             let mut parts = Vec::new();
             if let Some(year) = r.year {
-                parts.push(Span::styled(year.to_string(), s_dim));
+                parts.push(Span::styled(year.to_string(), s_date));
             }
             if let Some(ref journal) = r.journal {
                 if r.year.is_some() {
@@ -1815,26 +1866,26 @@ fn draw_preview(
 
         if !r.authors.is_empty() {
             let author_text = r.authors.join(" · ");
-            lines.push(Line::from(Span::styled(author_text, s_accent)));
+            lines.push(Line::from(Span::styled(author_text, s_author)));
             lines.push(Line::from(""));
         }
 
         if let Some(ref doi) = r.doi {
             lines.push(Line::from(vec![
                 Span::styled("doi   ", s_muted),
-                Span::styled(doi.as_str(), s_dim),
+                Span::styled(doi.as_str(), s_link),
             ]));
         }
         if let Some(ref arxiv) = r.arxiv {
             lines.push(Line::from(vec![
                 Span::styled("arxiv ", s_muted),
-                Span::styled(arxiv.as_str(), s_dim),
+                Span::styled(arxiv.as_str(), s_link),
             ]));
         }
         if !r.tags.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("tags  ", s_muted),
-                Span::styled(r.tags.join(", "), s_warm),
+                Span::styled(r.tags.join(", "), s_hl),
             ]));
         }
 
@@ -2054,8 +2105,8 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
     let s_text = Style::default().fg(t.text);
     let s_dim = Style::default().fg(t.text_dim);
     let s_muted = Style::default().fg(t.text_muted);
-    let s_accent = Style::default().fg(t.accent);
-    let s_warm = Style::default().fg(t.warm);
+    let s_author = Style::default().fg(t.author);
+    let s_hl = Style::default().fg(t.highlight);
 
     let area = f.area();
 
@@ -2083,7 +2134,7 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
         let marker = if i == selected { "> " } else { "  " };
         let pdf_indicator = if e.has_pdf { " [PDF]" } else { "" };
         let label = format!("{}{}{} ({}/9)", marker, e.dir_name, pdf_indicator, e.score);
-        let style = if i == selected { s_accent.add_modifier(Modifier::BOLD) } else { s_dim };
+        let style = if i == selected { s_author.add_modifier(Modifier::BOLD) } else { s_dim };
         ListItem::new(Span::styled(label, style))
     }).collect();
 
@@ -2094,11 +2145,11 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
 
     // Footer
     let footer = Line::from(vec![
-        Span::styled(" enter", s_accent),
+        Span::styled(" enter", s_author),
         Span::styled("=keep  ", s_dim),
-        Span::styled("s", s_accent),
+        Span::styled("s", s_author),
         Span::styled("=skip  ", s_dim),
-        Span::styled("q", s_accent),
+        Span::styled("q", s_author),
         Span::styled("=quit", s_dim),
     ]);
     f.render_widget(Paragraph::new(footer), left[2]);
@@ -2112,7 +2163,7 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
     lines.push(Line::default());
 
     if !r.authors.is_empty() {
-        lines.push(Line::from(Span::styled(r.authors.join(" · "), s_accent)));
+        lines.push(Line::from(Span::styled(r.authors.join(" · "), s_author)));
     }
     if let Some(year) = r.year {
         lines.push(Line::from(Span::styled(format!("{}", year), s_dim)));
@@ -2137,7 +2188,7 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
     if !r.tags.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("Tags: ", s_muted),
-            Span::styled(r.tags.join(", "), s_warm),
+            Span::styled(r.tags.join(", "), s_hl),
         ]));
     }
     if !r.files.is_empty() {

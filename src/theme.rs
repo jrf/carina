@@ -7,8 +7,10 @@ pub struct Theme {
     pub text: Color,
     pub text_dim: Color,
     pub text_muted: Color,
-    pub accent: Color,
-    pub warm: Color,
+    pub author: Color,
+    pub highlight: Color,
+    pub link: Color,
+    pub date: Color,
     pub border: Color,
     pub selection: Color,
     pub popup_bg: Color,
@@ -23,9 +25,11 @@ fn default_theme() -> Theme {
         text: Color::Rgb(200, 211, 245),       // #c8d3f5 — fg
         text_dim: Color::Rgb(130, 139, 184),   // #828bb8 — fg_dark
         text_muted: Color::Rgb(59, 66, 97),    // #3b4261 — fg_gutter
-        accent: Color::Rgb(192, 153, 255),     // #c099ff — magenta
-        warm: Color::Rgb(255, 199, 119),       // #ffc777 — yellow
-        border: Color::Rgb(27, 29, 43),        // #1b1d2b — ui.window
+        author: Color::Rgb(192, 153, 255),      // #c099ff — magenta
+        highlight: Color::Rgb(255, 199, 119),  // #ffc777 — yellow
+        link: Color::Rgb(130, 170, 255),       // #82aaff — blue
+        date: Color::Rgb(195, 232, 141),       // #c3e88d — green
+        border: Color::Rgb(59, 66, 97),        // #3b4261 — fg_gutter
         selection: Color::Rgb(47, 51, 77),     // #2f334d — bg_highlight
         popup_bg: Color::Rgb(30, 32, 48),      // #1e2030 — ui.popup bg
         popup_border: Color::Rgb(88, 158, 215), // #589ed7 — border_highlight
@@ -48,8 +52,10 @@ pub struct UiConfig {
     pub text: Option<String>,
     pub text_dim: Option<String>,
     pub text_muted: Option<String>,
-    pub accent: Option<String>,
-    pub warm: Option<String>,
+    pub author: Option<String>,
+    pub highlight: Option<String>,
+    pub link: Option<String>,
+    pub date: Option<String>,
     pub border: Option<String>,
     pub selection: Option<String>,
     pub popup_bg: Option<String>,
@@ -90,8 +96,10 @@ impl ThemeConfig {
             text: r(ui.map(|u| &u.text), base.text),
             text_dim: r(ui.map(|u| &u.text_dim), base.text_dim),
             text_muted: r(ui.map(|u| &u.text_muted), base.text_muted),
-            accent: r(ui.map(|u| &u.accent), base.accent),
-            warm: r(ui.map(|u| &u.warm), base.warm),
+            author: r(ui.map(|u| &u.author), base.author),
+            highlight: r(ui.map(|u| &u.highlight), base.highlight),
+            link: r(ui.map(|u| &u.link), base.link),
+            date: r(ui.map(|u| &u.date), base.date),
             border: r(ui.map(|u| &u.border), base.border),
             selection: r(ui.map(|u| &u.selection), base.selection),
             popup_bg: r(ui.map(|u| &u.popup_bg), base.popup_bg),
