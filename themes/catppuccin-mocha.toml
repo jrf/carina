@@ -1,0 +1,17 @@
+[colors]
+text = "#cdd6f4"
+subtext0 = "#a6adc8"
+overlay0 = "#585b70"
+blue = "#89b4fa"
+yellow = "#f9e2af"
+surface1 = "#45475a"
+surface0 = "#313244"
+
+[ui]
+text = "text"
+text_dim = "subtext0"
+text_muted = "overlay0"
+accent = "blue"
+warm = "yellow"
+border = "surface1"
+selection = "surface0"

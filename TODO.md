@@ -2,25 +2,30 @@
 
 ## Now
 
-- [ ] PDF full-text indexing into FTS5 #feature
-- [ ] URL import: `carina add <url>` downloads PDF from arbitrary URLs #feature
-- [ ] `carina tag` command for quick tagging without opening editor #improvement
+- [ ] `carina related` via Semantic Scholar API #feature
 
 ## Next
 
-- [ ] `carina related` via Semantic Scholar API #feature
+- [ ] APA/Chicago formatted citation output #feature
+- [ ] Batch operations: `carina tag --all`, `carina bib --all` #improvement
 
 ## Later
 
-- [ ] APA/Chicago formatted citation output #feature
 - [ ] iCloud sync documentation and testing #docs
-- [ ] Batch operations: `carina tag --all`, `carina bib --all` #improvement
 - [ ] Configurable browse keybindings #improvement
 
 ## Scrapped
 
 ## Done
 
+- [x] `carina tag` command: `tag list`, `tag add`, `tag rm` #feature
+- [x] PDF full-text indexing into FTS5 on `reindex` and `add` #feature
+- [x] URL import: `carina add <url>` downloads PDF and imports #feature
+- [x] Native TUI: replaced fzf with nucleo + ratatui for browse and cite #feature
+- [x] Theme system: 6 built-in themes, custom TOML themes, configurable via config.toml #feature
+- [x] Helix integration: `carina cite` works via `:insert-output` using `/dev/tty` #improvement
+- [x] Duplicate detection: `carina duplicates` and interactive `carina dedup` #feature
+- [x] Ad-hoc codesign on `just install` to prevent macOS SIGKILL #chore
 - [x] Project scaffold: `cargo init`, dependencies, module structure #chore
 - [x] Config: library path resolution (`$CARINA_LIBRARY`, config.toml, `~/Papers`) #feature
 - [x] Storage: create reference directories, copy PDFs, write `info.toml` #feature
@@ -31,7 +36,6 @@
 - [x] Open: `carina open` with `$CARINA_READER` or `open` fallback, `--reader` flag #feature
 - [x] Edit: `carina edit` opens `info.toml` in `$EDITOR` #feature
 - [x] BibTeX export: `carina bib <query>` #feature
-- [x] fzf browser: `carina` launches interactive picker with preview and keybindings #feature
 - [x] Import from Polaris: `carina import-polaris` with `--force` flag #feature
 - [x] SQLite FTS5 index: schema, indexing, `carina reindex` #feature
 - [x] Picker-agnostic: configurable via `$CARINA_PICKER` or config.toml #improvement

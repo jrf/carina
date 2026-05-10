@@ -1,0 +1,17 @@
+[colors]
+fg = "#dcd7ba"
+fg_dim = "#95938c"
+fg_muted = "#545458"
+blue = "#7e9cd8"
+yellow = "#e2c272"
+bg3 = "#36363b"
+bg2 = "#2a2a2f"
+
+[ui]
+text = "fg"
+text_dim = "fg_dim"
+text_muted = "fg_muted"
+accent = "blue"
+warm = "yellow"
+border = "bg3"
+selection = "bg2"

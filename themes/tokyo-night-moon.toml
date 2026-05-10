@@ -1,0 +1,16 @@
+[colors]
+fg = "#c8d3f5"
+fg_dim = "#828bb8"
+fg_gutter = "#3b4261"
+blue = "#82aaff"
+yellow = "#ffc777"
+bg_highlight = "#2a2f49"
+
+[ui]
+text = "fg"
+text_dim = "fg_dim"
+text_muted = "fg_gutter"
+accent = "blue"
+warm = "yellow"
+border = "fg_gutter"
+selection = "bg_highlight"

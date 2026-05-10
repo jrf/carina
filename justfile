@@ -25,4 +25,7 @@ clean:
 install: release
     cp target/release/carina ~/.local/bin/carina
     codesign -s - ~/.local/bin/carina
+    mkdir -p ~/.config/carina/themes
+    cp themes/*.toml ~/.config/carina/themes/
     @echo "Installed → ~/.local/bin/carina"
+    @echo "Themes   → ~/.config/carina/themes/"

@@ -12,7 +12,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::config::Config as AppConfig;
@@ -38,6 +38,55 @@ pub struct App {
     mode: Mode,
     should_quit: bool,
     pending_output: Option<String>,
+    tag_filter: Option<String>,
+    all_tags: Vec<String>,
+    tag_popup: Option<TagPopup>,
+}
+
+struct TagPopup {
+    filter: String,
+    filtered_tags: Vec<String>,
+    selected: usize,
+}
+
+impl TagPopup {
+    fn new(all_tags: &[String]) -> Self {
+        let mut tags = vec!["(all)".to_string()];
+        tags.extend(all_tags.iter().cloned());
+        Self {
+            filter: String::new(),
+            filtered_tags: tags,
+            selected: 0,
+        }
+    }
+
+    fn rebuild(&mut self, all_tags: &[String]) {
+        let mut tags = vec!["(all)".to_string()];
+        tags.extend(all_tags.iter().cloned());
+        if self.filter.is_empty() {
+            self.filtered_tags = tags;
+        } else {
+            let f = self.filter.to_lowercase();
+            self.filtered_tags = tags.into_iter().filter(|t| t.to_lowercase().contains(&f)).collect();
+        }
+        if self.selected >= self.filtered_tags.len() {
+            self.selected = self.filtered_tags.len().saturating_sub(1);
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        if !self.filtered_tags.is_empty() {
+            self.selected = (self.selected + 1).min(self.filtered_tags.len() - 1);
+        }
+    }
+
+    fn selected_tag(&self) -> Option<&str> {
+        self.filtered_tags.get(self.selected).map(|s| s.as_str())
+    }
 }
 
 enum Mode {
@@ -103,6 +152,36 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
         }
 
         if let Event::Key(key) = event::read()? {
+            if app.tag_popup.is_some() {
+                match key.code {
+                    KeyCode::Esc => { app.tag_popup = None; }
+                    KeyCode::Up => { app.tag_popup.as_mut().unwrap().move_up(); }
+                    KeyCode::Down => { app.tag_popup.as_mut().unwrap().move_down(); }
+                    KeyCode::Backspace => {
+                        let popup = app.tag_popup.as_mut().unwrap();
+                        popup.filter.pop();
+                        popup.rebuild(&app.all_tags);
+                    }
+                    KeyCode::Char(c) => {
+                        let popup = app.tag_popup.as_mut().unwrap();
+                        popup.filter.push(c);
+                        popup.rebuild(&app.all_tags);
+                    }
+                    KeyCode::Enter => {
+                        let tag = app.tag_popup.as_ref().unwrap().selected_tag()
+                            .map(|s| s.to_string());
+                        app.tag_popup = None;
+                        match tag.as_deref() {
+                            Some("(all)") | None => { app.tag_filter = None; }
+                            Some(t) => { app.tag_filter = Some(t.to_string()); }
+                        }
+                        app.rebuild_filter();
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match (key.code, key.modifiers) {
                 (KeyCode::Esc, _) => app.should_quit = true,
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
@@ -120,6 +199,10 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                 (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => app.move_down(),
                 (KeyCode::Char('b'), KeyModifiers::CONTROL) => app.page_up(),
                 (KeyCode::Char('f'), KeyModifiers::CONTROL) => app.page_down(),
+
+                (KeyCode::Tab, _) => {
+                    app.tag_popup = Some(TagPopup::new(&app.all_tags));
+                }
 
                 (KeyCode::Enter, _) => {
                     app.action_select()?;
@@ -167,6 +250,14 @@ impl App {
 
         let theme = theme::load_theme(config.theme.as_deref());
 
+        let mut tag_set = std::collections::BTreeSet::new();
+        for e in &entries {
+            for tag in &e.reference.tags {
+                tag_set.insert(tag.clone());
+            }
+        }
+        let all_tags: Vec<String> = tag_set.into_iter().collect();
+
         let mut app = App {
             entries,
             filtered_indices,
@@ -183,6 +274,9 @@ impl App {
             mode,
             should_quit: false,
             pending_output: None,
+            tag_filter: None,
+            all_tags,
+            tag_popup: None,
         };
 
         if !app.filter.is_empty() {
@@ -196,8 +290,17 @@ impl App {
     }
 
     fn rebuild_filter(&mut self) {
+        let tag_filtered: Vec<usize> = if let Some(ref tag) = self.tag_filter {
+            self.entries.iter().enumerate()
+                .filter(|(_, e)| e.reference.tags.iter().any(|t| t == tag))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            (0..self.entries.len()).collect()
+        };
+
         if self.filter.is_empty() {
-            self.filtered_indices = (0..self.entries.len()).collect();
+            self.filtered_indices = tag_filtered;
         } else {
             let pattern = Pattern::parse(
                 &self.filter,
@@ -207,12 +310,10 @@ impl App {
             let mut matcher = Matcher::new(Config::DEFAULT);
             let mut buf = Vec::new();
 
-            let mut scored: Vec<(usize, u32)> = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, e)| {
-                    let haystack = Utf32Str::new(&e.display, &mut buf);
+            let mut scored: Vec<(usize, u32)> = tag_filtered
+                .into_iter()
+                .filter_map(|i| {
+                    let haystack = Utf32Str::new(&self.entries[i].display, &mut buf);
                     pattern.score(haystack, &mut matcher).map(|s| (i, s))
                 })
                 .collect();
@@ -419,20 +520,20 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Filter input
     let prompt = " search: ";
-    let filter_spans = if app.filter.is_empty() {
-        vec![Span::styled(prompt, s_muted)]
-    } else {
-        vec![
-            Span::styled(prompt, s_muted),
-            Span::styled(&app.filter, s_text),
-        ]
-    };
+    let mut filter_spans = vec![Span::styled(prompt, s_muted)];
+    if let Some(ref tag) = app.tag_filter {
+        filter_spans.push(Span::styled(format!("[{}] ", tag), s_warm));
+    }
+    if !app.filter.is_empty() {
+        filter_spans.push(Span::styled(&app.filter, s_text));
+    }
     f.render_widget(
         Paragraph::new(Line::from(filter_spans)),
         left_chunks[0],
     );
 
-    let cursor_x = left_chunks[0].x + prompt.len() as u16 + app.filter.len() as u16;
+    let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0); // "[tag] "
+    let cursor_x = left_chunks[0].x + prompt.len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
     let cursor_y = left_chunks[0].y;
     f.set_cursor_position((cursor_x, cursor_y));
 
@@ -481,8 +582,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Status bar
     let count = format!("  {}/{}", app.filtered_indices.len(), app.entries.len());
     let mode_hint = match &app.mode {
-        Mode::Browse => "  enter open  ^e edit  ^y bib  esc quit",
-        Mode::Cite { .. } => "  enter select  esc cancel",
+        Mode::Browse => "  enter open  ^e edit  ^y bib  tab tags  esc quit",
+        Mode::Cite { .. } => "  enter select  tab tags  esc cancel",
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -576,6 +677,72 @@ fn draw(f: &mut Frame, app: &mut App) {
             Paragraph::new(Span::styled("No selection", s_muted)),
             preview_area[1],
         );
+    }
+
+    // Tag picker popup
+    if let Some(ref popup) = app.tag_popup {
+        let area = f.area();
+        let max_visible = 20.min(popup.filtered_tags.len());
+        let height = max_visible as u16 + 4;
+        let width = 36.min(area.width.saturating_sub(4));
+        let x = area.width.saturating_sub(width) / 2;
+        let y = area.height.saturating_sub(height) / 2;
+        let popup_area = ratatui::layout::Rect::new(x, y, width, height);
+
+        f.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.accent))
+            .title(" Tags ")
+            .title_style(s_accent.add_modifier(Modifier::BOLD));
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        let popup_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+        let filter_line = if popup.filter.is_empty() {
+            Line::from(Span::styled(" type to filter...", s_muted))
+        } else {
+            Line::from(vec![
+                Span::styled(" > ", s_accent),
+                Span::styled(&popup.filter, s_text),
+            ])
+        };
+        f.render_widget(Paragraph::new(filter_line), popup_chunks[0]);
+
+        let scroll = if popup.selected >= max_visible {
+            popup.selected - max_visible + 1
+        } else {
+            0
+        };
+
+        let lines: Vec<Line> = popup.filtered_tags.iter()
+            .enumerate()
+            .skip(scroll)
+            .take(max_visible)
+            .map(|(i, tag)| {
+                let is_selected = i == popup.selected;
+                let prefix = if is_selected { " > " } else { "   " };
+                let style = if is_selected {
+                    Style::default().fg(t.text).bg(t.selection).add_modifier(Modifier::BOLD)
+                } else if tag == "(all)" {
+                    s_dim
+                } else {
+                    Style::default().fg(t.warm)
+                };
+                Line::from(Span::styled(format!("{}{}", prefix, tag), style))
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), popup_chunks[1]);
+
+        let hint = Line::from(Span::styled(" enter select  esc cancel", s_muted));
+        f.render_widget(Paragraph::new(hint), popup_chunks[2]);
     }
 }
 
