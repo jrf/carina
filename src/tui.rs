@@ -617,7 +617,6 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     (KeyCode::Char('s'), KeyModifiers::NONE) => {
                         app.sort_mode = app.sort_mode.next();
                         app.rebuild_filter();
-                        app.flash = Some((format!("Sort: {}", app.sort_mode.label()), std::time::Instant::now()));
                     }
 
                     (KeyCode::Char('J'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
@@ -1440,8 +1439,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(list, left_chunks[1], &mut app.list_state);
 
     // Status bar
-    let sort_label = if app.filter.is_empty() { format!(" [{}]", app.sort_mode.label()) } else { String::new() };
-    let count = format!("  {}/{}{}", app.filtered_indices.len(), app.entries.len(), sort_label);
+    let count = format!("  {}/{}", app.filtered_indices.len(), app.entries.len());
     let mode_indicator = match app.input_mode {
         InputMode::Normal => Span::styled(
             " NOR ",
@@ -1457,19 +1455,32 @@ fn draw(f: &mut Frame, app: &mut App) {
         (InputMode::Normal, Mode::Browse) => "  / search  c clear  q quit",
         (InputMode::Normal, Mode::Cite { .. }) => "  / search  c clear  q quit",
     };
-    let right_status = if let Some(flash) = app.flash_message() {
+    let left_status = if let Some(flash) = app.flash_message() {
         Span::styled(format!("  {}", flash), s_warm)
     } else {
         Span::styled(mode_hint, s_muted)
     };
+    let sort_indicator = if app.sort_mode != SortMode::Name {
+        format!("sort: {} ", app.sort_mode.label())
+    } else {
+        String::new()
+    };
+    let status_area = left_chunks[2];
     f.render_widget(
         Paragraph::new(Line::from(vec![
             mode_indicator,
             Span::styled(count, s_muted),
-            right_status,
+            left_status,
         ])),
-        left_chunks[2],
+        status_area,
     );
+    if !sort_indicator.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(&sort_indicator, s_muted)))
+                .alignment(ratatui::layout::Alignment::Right),
+            status_area,
+        );
+    }
 
     // Preview pane
     if let Some(pane_area) = preview_area {
