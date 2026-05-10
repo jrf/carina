@@ -18,10 +18,10 @@ fn default_theme() -> Theme {
         text: Color::Rgb(200, 211, 245),       // #c8d3f5
         text_dim: Color::Rgb(130, 139, 184),   // #828bb8
         text_muted: Color::Rgb(59, 66, 97),    // #3b4261
-        accent: Color::Rgb(130, 170, 255),     // #82aaff
+        accent: Color::Rgb(192, 153, 255),     // #c099ff
         warm: Color::Rgb(255, 199, 119),       // #ffc777
         border: Color::Rgb(59, 66, 97),        // #3b4261
-        selection: Color::Rgb(42, 47, 73),     // #2a2f49
+        selection: Color::Rgb(47, 51, 77),     // #2f334d
     }
 }
 
