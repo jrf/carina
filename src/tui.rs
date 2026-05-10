@@ -1426,7 +1426,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
             ListItem::new(Line::from(vec![
                 Span::styled(year_str, s_muted),
-                Span::styled(author_str, s_dim),
+                Span::styled(author_str, s_accent),
                 Span::styled(title, s_text),
             ]))
         })
@@ -1476,7 +1476,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     );
     if !sort_indicator.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(&sort_indicator, s_muted)))
+            Paragraph::new(Line::from(Span::styled(&sort_indicator, s_warm)))
                 .alignment(ratatui::layout::Alignment::Right),
             status_area,
         );
@@ -1514,7 +1514,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             .split(inner[1]);
             ((), content[1])
         };
-        let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, accent: s_accent };
+        let styles = Styles { text: s_text, dim: s_dim, muted: s_muted, accent: s_accent, warm: s_warm };
         draw_preview(f, app, content_area, &styles);
     }
 
@@ -1799,6 +1799,7 @@ struct Styles {
     dim: Style,
     muted: Style,
     accent: Style,
+    warm: Style,
 }
 
 fn draw_preview(
@@ -1811,6 +1812,7 @@ fn draw_preview(
     let s_dim = s.dim;
     let s_muted = s.muted;
     let s_accent = s.accent;
+    let s_warm = s.warm;
     if let Some(entry) = app.selected_entry() {
         let r = &entry.reference;
         let mut lines: Vec<Line> = Vec::new();
@@ -1859,7 +1861,7 @@ fn draw_preview(
         if !r.tags.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("tags  ", s_muted),
-                Span::styled(r.tags.join(", "), s_dim),
+                Span::styled(r.tags.join(", "), s_warm),
             ]));
         }
 
@@ -2080,6 +2082,7 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
     let s_dim = Style::default().fg(t.text_dim);
     let s_muted = Style::default().fg(t.text_muted);
     let s_accent = Style::default().fg(t.accent);
+    let s_warm = Style::default().fg(t.warm);
 
     let area = f.area();
 
@@ -2161,7 +2164,7 @@ fn draw_dedup(f: &mut Frame, theme: &Theme, entries: &[DedupEntry], selected: us
     if !r.tags.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("Tags: ", s_muted),
-            Span::styled(r.tags.join(", "), s_dim),
+            Span::styled(r.tags.join(", "), s_warm),
         ]));
     }
     if !r.files.is_empty() {
