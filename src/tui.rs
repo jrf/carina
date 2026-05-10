@@ -50,6 +50,7 @@ pub struct App {
     preview_scroll: u16,
     show_help: bool,
     list_height: usize,
+    add_input: Option<String>,
 }
 
 struct TagPopup {
@@ -314,6 +315,21 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                 continue;
             }
 
+            if app.add_input.is_some() {
+                match key.code {
+                    KeyCode::Esc => { app.add_input = None; }
+                    KeyCode::Enter => { app.submit_add(); }
+                    KeyCode::Backspace => {
+                        if let Some(ref mut s) = app.add_input { s.pop(); }
+                    }
+                    KeyCode::Char(c) => {
+                        if let Some(ref mut s) = app.add_input { s.push(c); }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             if app.tag_popup.is_some() {
                 match (key.code, key.modifiers) {
                     (KeyCode::Esc, _) => {
@@ -478,7 +494,7 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                         app.action_open_url();
                     }
                     (KeyCode::Char('a'), KeyModifiers::NONE) => {
-                        app.action_add(terminal, tty_ctl)?;
+                        app.add_input = Some(String::new());
                     }
                     (KeyCode::Char('d'), KeyModifiers::NONE) => {
                         run_dedup(terminal, app)?;
@@ -565,6 +581,7 @@ impl App {
             preview_scroll: 0,
             show_help: false,
             list_height: 20,
+            add_input: None,
         };
 
         if !app.filter.is_empty() {
@@ -826,46 +843,38 @@ impl App {
         })
     }
 
-    fn action_add(&mut self, terminal: &mut Term, tty_ctl: &mut File) -> Result<()> {
-        terminal::disable_raw_mode()?;
-        tty_ctl.execute(LeaveAlternateScreen)?;
+    fn submit_add(&mut self) {
+        let input = match self.add_input.take() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => { self.add_input = None; return; }
+        };
 
-        print!("Add (path, DOI, arXiv ID, or URL): ");
-        use std::io::Write;
-        std::io::stdout().flush()?;
+        self.flash = Some(("Adding...".to_string(), std::time::Instant::now()));
 
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let input = input.trim();
+        let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("carina"));
+        let output = std::process::Command::new(bin)
+            .arg("add")
+            .arg(&input)
+            .output();
 
-        if !input.is_empty() {
-            let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("carina"));
-            let status = std::process::Command::new(bin)
-                .arg("add")
-                .arg(input)
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    println!("\nPress enter to continue...");
-                    let _ = std::io::stdin().read_line(&mut String::new());
-                }
-                Ok(_) => {
-                    println!("\nAdd failed. Press enter to continue...");
-                    let _ = std::io::stdin().read_line(&mut String::new());
-                }
-                Err(e) => {
-                    println!("\nError: {}. Press enter to continue...", e);
-                    let _ = std::io::stdin().read_line(&mut String::new());
-                }
+        match output {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let msg = stdout.lines().find(|l| l.starts_with("Added:"))
+                    .unwrap_or("Added successfully")
+                    .to_string();
+                self.flash = Some((msg, std::time::Instant::now()));
+                self.reload_entries();
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let msg = stderr.lines().last().unwrap_or("Add failed").to_string();
+                self.flash = Some((msg, std::time::Instant::now()));
+            }
+            Err(e) => {
+                self.flash = Some((format!("Error: {}", e), std::time::Instant::now()));
             }
         }
-
-        tty_ctl.execute(EnterAlternateScreen)?;
-        terminal::enable_raw_mode()?;
-        terminal.clear()?;
-
-        self.reload_entries();
-        Ok(())
     }
 
     fn reload_entries(&mut self) {
@@ -962,25 +971,36 @@ fn draw(f: &mut Frame, app: &mut App) {
     ])
     .split(list_area);
 
-    // Filter input
-    let prompt = " search: ";
-    let mut filter_spans = vec![Span::styled(prompt, s_muted)];
-    if let Some(ref tag) = app.tag_filter {
-        filter_spans.push(Span::styled(format!("[{}] ", tag), s_accent));
-    }
-    if !app.filter.is_empty() {
-        filter_spans.push(Span::styled(&app.filter, s_text));
-    }
-    f.render_widget(
-        Paragraph::new(Line::from(filter_spans)),
-        left_chunks[0],
-    );
+    // Filter / add input
+    if let Some(ref add_text) = app.add_input {
+        let add_prompt = " add: ";
+        let spans = vec![
+            Span::styled(add_prompt, s_warm),
+            Span::styled(add_text.as_str(), s_text),
+        ];
+        f.render_widget(Paragraph::new(Line::from(spans)), left_chunks[0]);
+        let cursor_x = left_chunks[0].x + add_prompt.len() as u16 + add_text.len() as u16;
+        f.set_cursor_position((cursor_x, left_chunks[0].y));
+    } else {
+        let prompt = " search: ";
+        let mut filter_spans = vec![Span::styled(prompt, s_muted)];
+        if let Some(ref tag) = app.tag_filter {
+            filter_spans.push(Span::styled(format!("[{}] ", tag), s_accent));
+        }
+        if !app.filter.is_empty() {
+            filter_spans.push(Span::styled(&app.filter, s_text));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(filter_spans)),
+            left_chunks[0],
+        );
 
-    if app.input_mode == InputMode::Insert {
-        let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
-        let cursor_x = left_chunks[0].x + prompt.len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
-        let cursor_y = left_chunks[0].y;
-        f.set_cursor_position((cursor_x, cursor_y));
+        if app.input_mode == InputMode::Insert {
+            let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
+            let cursor_x = left_chunks[0].x + prompt.len() as u16 + tag_label_len as u16 + app.filter.len() as u16;
+            let cursor_y = left_chunks[0].y;
+            f.set_cursor_position((cursor_x, cursor_y));
+        }
     }
 
     // Paper list — year + author + title
