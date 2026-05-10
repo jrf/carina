@@ -536,15 +536,8 @@ fn draw(f: &mut Frame, app: &mut App) {
 
         // Authors
         if !r.authors.is_empty() {
-            for author in r.authors.iter().take(8) {
-                lines.push(Line::from(Span::styled(author.as_str(), s_accent)));
-            }
-            if r.authors.len() > 8 {
-                lines.push(Line::from(Span::styled(
-                    format!("+{} more", r.authors.len() - 8),
-                    s_muted,
-                )));
-            }
+            let author_text = r.authors.join(", ");
+            lines.push(Line::from(Span::styled(author_text, s_accent)));
             lines.push(Line::from(""));
         }
 
