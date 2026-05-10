@@ -538,7 +538,7 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     }
 
                     (KeyCode::Enter, _) => {
-                        app.action_select()?;
+                        app.input_mode = InputMode::Normal;
                     }
 
                     _ => {}
@@ -612,8 +612,10 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                         app.action_reindex();
                     }
                     (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                        app.sort_mode = app.sort_mode.next();
-                        app.rebuild_filter();
+                        if app.filter.is_empty() {
+                            app.sort_mode = app.sort_mode.next();
+                            app.rebuild_filter();
+                        }
                     }
 
                     (KeyCode::Char('J'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
