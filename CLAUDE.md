@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Carina is a CLI reference/paper manager written in Rust. The filesystem is the source of truth — each reference is a directory containing a PDF and an `info.toml` metadata file. SQLite (with FTS5) serves as a read cache/index, fully rebuildable from the filesystem at any time.
+Grimoire (`grim`) is a CLI reference/paper manager written in Rust. The filesystem is the source of truth — each reference is a directory containing a PDF and an `info.toml` metadata file. SQLite (with FTS5) serves as a read cache/index, fully rebuildable from the filesystem at any time.
 
 ## Build commands
 
@@ -21,7 +21,7 @@ Carina is a CLI reference/paper manager written in Rust. The filesystem is the s
 ### Filesystem layout (library)
 
 ```
-~/Papers/                          # configurable via $CARINA_LIBRARY or config
+~/Papers/                          # configurable via $GRIM_LIBRARY or config
   vaswani-2017-attention/
     info.toml                      # source of truth — human-editable metadata
     vaswani-2017-attention.pdf
@@ -34,14 +34,14 @@ Directory naming: `{first-author}-{year}-{first-title-word}`, with `-2` suffix o
 
 ### Core design principles
 
-- **Filesystem is truth.** SQLite is a disposable index. `carina reindex` rebuilds it from scratch.
+- **Filesystem is truth.** SQLite is a disposable index. `grim reindex` rebuilds it from scratch.
 - **Opinionated defaults.** Library at `~/Papers`, `$EDITOR` for metadata editing, `open` for PDF viewing. Minimal config needed.
 - **Fast.** Rust + SQLite FTS5. No Python startup tax.
 - **Composable.** Output is pipe-friendly. Integrates with `jq`, `$EDITOR`.
 
 ### Config
 
-`~/.config/carina/config.toml` — library path, default editor/viewer overrides.
+`~/.config/grimoire/config.toml` — library path, default editor/viewer overrides.
 
 ### Metadata schema (info.toml)
 
@@ -63,6 +63,7 @@ The dominant sequence transduction models...
 
 - **Import:** copy PDF into named directory, extract metadata from PDF attributes, fetch from arXiv/CrossRef by DOI if available, write `info.toml`, index into SQLite.
 - **Search:** FTS5 query across title, authors, abstract, PDF full text.
-- **Export:** generate BibTeX from `info.yaml` fields.
+- **Export:** generate BibTeX from `info.toml` fields.
 - **Edit:** open `info.toml` in `$EDITOR`.
-- **Open:** open PDF in system viewer or `$CARINA_READER`.
+- **Open:** open PDF in system viewer or `$GRIM_READER`.
+- **Validate:** check library integrity — missing PDFs, junk files, temp names, incomplete metadata.

@@ -170,31 +170,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
-name = "carina"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "clap_complete",
- "crossterm 0.28.1",
- "dirs",
- "lopdf",
- "nucleo-matcher",
- "quick-xml",
- "ratatui",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "shellexpand",
- "slug",
- "tempfile",
- "toml",
- "urlencoding",
-]
-
-[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -817,6 +792,31 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "grim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "crossterm 0.28.1",
+ "dirs",
+ "lopdf",
+ "nucleo-matcher",
+ "quick-xml",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "shellexpand",
+ "slug",
+ "tempfile",
+ "toml",
+ "urlencoding",
 ]
 
 [[package]]

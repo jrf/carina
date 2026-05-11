@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use config::Config;
 
 #[derive(Parser)]
-#[command(name = "carina", about = "A fast, opinionated reference manager")]
+#[command(name = "grim", about = "A fast, opinionated reference manager")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

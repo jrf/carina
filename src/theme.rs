@@ -117,7 +117,7 @@ pub fn load_theme(config_theme: Option<&str>) -> Theme {
 
     let theme_dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("carina")
+        .join("grimoire")
         .join("themes");
 
     let theme_file = theme_dir.join(format!("{}.toml", name));

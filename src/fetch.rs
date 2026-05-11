@@ -56,7 +56,7 @@ pub fn search_crossref_by_title(title: &str) -> Result<Reference> {
     );
     let body = reqwest::blocking::Client::new()
         .get(&url)
-        .header("User-Agent", "Carina/0.1 (reference manager; mailto:carina@example.com)")
+        .header("User-Agent", "Grimoire/0.1 (reference manager; mailto:jrfetzer@gmail.com)")
         .send()
         .context("Failed to reach CrossRef API")?
         .text()?;
@@ -101,7 +101,7 @@ pub fn fetch_crossref(doi: &str) -> Result<Reference> {
     let url = format!("https://api.crossref.org/works/{}", doi);
     let body = reqwest::blocking::Client::new()
         .get(&url)
-        .header("User-Agent", "Carina/0.1 (reference manager; mailto:carina@example.com)")
+        .header("User-Agent", "Grimoire/0.1 (reference manager; mailto:jrfetzer@gmail.com)")
         .send()
         .context("Failed to reach CrossRef API")?
         .text()?;

@@ -89,7 +89,8 @@ pub struct App {
 }
 
 struct ValidatePopup {
-    lines: Vec<String>,
+    summary: String,
+    issues: Vec<String>,
     scroll: u16,
 }
 
@@ -210,7 +211,7 @@ impl ThemePopup {
         let mut names = Vec::new();
         let theme_dir = dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("carina")
+            .join("grimoire")
             .join("themes");
         if let Ok(entries) = std::fs::read_dir(&theme_dir) {
             names = entries
@@ -291,7 +292,7 @@ enum InputMode {
 pub fn browse(config: &AppConfig, library: &Path, initial_query: Option<&str>) -> Result<()> {
     let app = App::new(config, library, Mode::Browse, initial_query)?;
     if app.entries.is_empty() {
-        println!("Library is empty. Use `carina add <file.pdf>` to import a paper.");
+        println!("Library is empty. Use `grim add <file.pdf>` to import a paper.");
         return Ok(());
     }
     run_app(app)
@@ -907,22 +908,20 @@ impl App {
         match &self.mode {
             Mode::Browse => {
                 let pdf = if let Some(f) = entry.reference.files.first() {
-                    entry.dir.join(f)
+                    let p = entry.dir.join(f);
+                    if p.exists() { Some(p) } else { None }
                 } else {
-                    // Fall back to first PDF found in directory
-                    match std::fs::read_dir(&entry.dir)
+                    std::fs::read_dir(&entry.dir)
                         .ok()
                         .and_then(|rd| rd.flatten().find(|e| {
                             e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
                         }))
-                    {
-                        Some(e) => e.path(),
-                        None => return Ok(()),
-                    }
+                        .map(|e| e.path())
                 };
-                std::process::Command::new(self.config.reader())
-                    .arg(&pdf)
-                    .spawn()?;
+                match pdf {
+                    Some(p) => { std::process::Command::new(self.config.reader()).arg(&p).spawn()?; }
+                    None => { self.flash = Some(("No PDF available".to_string(), std::time::Instant::now())); }
+                }
             }
             Mode::Cite { format } => {
                 let key = entry.dir_name.clone();
@@ -1035,7 +1034,7 @@ impl App {
 
         self.flash = Some(("Adding...".to_string(), std::time::Instant::now()));
 
-        let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("carina"));
+        let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("grim"));
         let output = std::process::Command::new(bin)
             .arg("add")
             .arg(&input)
@@ -1079,9 +1078,11 @@ impl App {
         match validate::validate(&library, true) {
             Ok(result) => {
                 self.reload_entries();
-                let mut lines = vec![result.summary(), String::new()];
-                lines.extend(result.issues);
-                self.validate_popup = Some(ValidatePopup { lines, scroll: 0 });
+                self.validate_popup = Some(ValidatePopup {
+                    summary: result.summary(),
+                    issues: result.issues,
+                    scroll: 0,
+                });
             }
             Err(e) => {
                 self.flash = Some((format!("Validate error: {}", e), std::time::Instant::now()));
@@ -1785,7 +1786,8 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Validate popup
     if let Some(ref vp) = app.validate_popup {
-        let height = (vp.lines.len() as u16 + 4).min(area.height.saturating_sub(4));
+        let line_count = vp.issues.len() as u16 + 3;
+        let height = (line_count + 4).min(area.height.saturating_sub(4));
         let width = 60.min(area.width.saturating_sub(4));
         let x = area.width.saturating_sub(width) / 2;
         let y = area.height.saturating_sub(height) / 2;
@@ -1802,9 +1804,13 @@ fn draw(f: &mut Frame, app: &mut App) {
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
 
-        let lines: Vec<Line> = vp.lines.iter()
-            .map(|l| Line::from(Span::styled(format!(" {}", l), s_dim)))
-            .collect();
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(format!(" {}", vp.summary), s_text)));
+        lines.push(Line::from(""));
+
+        for issue in &vp.issues {
+            lines.push(Line::from(Span::styled(format!(" {}", issue), s_dim)));
+        }
 
         f.render_widget(
             Paragraph::new(lines).scroll((vp.scroll, 0)),

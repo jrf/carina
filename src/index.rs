@@ -12,7 +12,7 @@ pub struct Index {
 
 impl Index {
     pub fn open(library: &Path) -> Result<Self> {
-        let db_path = library.join(".carina.db");
+        let db_path = library.join(".grimoire.db");
         let conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open index at {}", db_path.display()))?;
 

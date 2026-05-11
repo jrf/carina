@@ -5,27 +5,6 @@ use anyhow::Result;
 use crate::model::Reference;
 use crate::storage;
 
-#[derive(Debug)]
-enum Issue {
-    MissingPdf { dir: String },
-    FileListed { dir: String, file: String, problem: &'static str },
-    TempName { dir: String, file: String },
-    NoMetadata { dir: String, field: &'static str },
-}
-
-impl std::fmt::Display for Issue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Issue::MissingPdf { dir } => write!(f, "  no PDF: {}", dir),
-            Issue::FileListed { dir, file, problem } => {
-                write!(f, "  {}: {}/{}", problem, dir, file)
-            }
-            Issue::TempName { dir, file } => write!(f, "  temp name: {}/{}", dir, file),
-            Issue::NoMetadata { dir, field } => write!(f, "  missing {}: {}", field, dir),
-        }
-    }
-}
-
 pub struct ValidateResult {
     pub total: usize,
     pub fixed: usize,
@@ -49,7 +28,7 @@ impl ValidateResult {
 pub fn validate(library: &Path, fix: bool) -> Result<ValidateResult> {
     let dirs = storage::list_ref_dirs(library)?;
     let total = dirs.len();
-    let mut issues: Vec<Issue> = Vec::new();
+    let mut issues: Vec<String> = Vec::new();
     let mut fixed = 0u32;
 
     for ref_dir in &dirs {
@@ -60,23 +39,19 @@ pub fn validate(library: &Path, fix: bool) -> Result<ValidateResult> {
         let reference: Reference = toml::from_str(&content)?;
 
         if reference.title.is_empty() {
-            issues.push(Issue::NoMetadata { dir: dir_name.clone(), field: "title" });
+            issues.push(format!("missing title: {}", dir_name));
         }
         if reference.authors.is_empty() {
-            issues.push(Issue::NoMetadata { dir: dir_name.clone(), field: "authors" });
+            issues.push(format!("missing authors: {}", dir_name));
         }
         if reference.year.is_none() {
-            issues.push(Issue::NoMetadata { dir: dir_name.clone(), field: "year" });
+            issues.push(format!("missing year: {}", dir_name));
         }
 
         for listed_file in &reference.files {
             let file_path = ref_dir.join(listed_file);
             if !file_path.exists() {
-                issues.push(Issue::FileListed {
-                    dir: dir_name.clone(),
-                    file: listed_file.clone(),
-                    problem: "listed but missing",
-                });
+                issues.push(format!("listed but missing: {}/{}", dir_name, listed_file));
             } else if !is_pdf(&file_path) {
                 if fix {
                     std::fs::remove_file(&file_path)?;
@@ -88,11 +63,7 @@ pub fn validate(library: &Path, fix: bool) -> Result<ValidateResult> {
                     std::fs::write(&toml_path, &new_content)?;
                     fixed += 1;
                 } else {
-                    issues.push(Issue::FileListed {
-                        dir: dir_name.clone(),
-                        file: listed_file.clone(),
-                        problem: "not a PDF",
-                    });
+                    issues.push(format!("not a PDF: {}/{}", dir_name, listed_file));
                 }
             }
         }
@@ -106,7 +77,7 @@ pub fn validate(library: &Path, fix: bool) -> Result<ValidateResult> {
             });
 
         if !has_pdf && reference.files.is_empty() {
-            issues.push(Issue::MissingPdf { dir: dir_name.clone() });
+            issues.push(format!("no PDF: {}", dir_name));
         }
 
         for entry in std::fs::read_dir(ref_dir)?.filter_map(|e| e.ok()) {
@@ -123,24 +94,29 @@ pub fn validate(library: &Path, fix: bool) -> Result<ValidateResult> {
                     std::fs::write(&toml_path, &new_content)?;
                     fixed += 1;
                 } else {
-                    issues.push(Issue::TempName { dir: dir_name.clone(), file: fname });
+                    issues.push(format!("temp name: {}/{}", dir_name, fname));
                 }
             }
         }
     }
 
-    let issue_strings: Vec<String> = issues.iter().map(|i| i.to_string()).collect();
-
     Ok(ValidateResult {
         total,
         fixed: fixed as usize,
-        issues: issue_strings,
+        issues,
     })
 }
 
 pub fn run(library: &Path, fix: bool) -> Result<()> {
     let result = validate(library, fix)?;
-    println!("{}", result.summary());
+    if result.issues.is_empty() {
+        println!("{}", result.summary());
+    } else {
+        println!("{}", result.summary());
+        for issue in &result.issues {
+            println!("  {}", issue);
+        }
+    }
     Ok(())
 }
 
