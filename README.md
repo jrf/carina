@@ -2,13 +2,6 @@
 
 A fast reference manager for the terminal.
 
-## Philosophy
-
-- **Filesystem is truth.** Each reference is a directory containing a PDF and an `info.toml` metadata file. SQLite is a disposable search index.
-- **Opinionated defaults.** Works out of the box with zero configuration.
-- **Composable.** Pipe-friendly output. Built-in TUI for interactive browsing.
-- **Fast.** Rust + SQLite FTS5. No startup tax.
-
 ## Install
 
 Requires Rust.
