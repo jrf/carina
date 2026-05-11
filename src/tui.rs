@@ -257,12 +257,14 @@ impl LayoutMode {
         }
     }
 
-    fn resolve(self, width: u16, _height: u16) -> ResolvedLayout {
+    fn resolve(self, width: u16, height: u16) -> ResolvedLayout {
         match self {
             Self::Wide => ResolvedLayout::Wide,
             Self::Tall => ResolvedLayout::Tall,
             Self::Auto => {
-                if width >= 100 {
+                // Character cells are ~2x taller than wide, so scale height
+                // to approximate pixel aspect ratio.
+                if width as u32 >= height as u32 * 2 {
                     ResolvedLayout::Wide
                 } else {
                     ResolvedLayout::Tall
