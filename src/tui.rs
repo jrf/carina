@@ -1446,10 +1446,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Search / add bar
     let search_content = if let Some(ref add_text) = app.add_input {
-        Line::from(vec![
-            Span::styled("add: ", s_hl),
-            Span::styled(add_text.as_str(), s_text),
-        ])
+        Line::from(Span::styled(add_text.as_str(), s_text))
     } else {
         let mut spans = Vec::new();
         if let Some(ref tag) = app.tag_filter {
@@ -1461,7 +1458,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         Line::from(spans)
     };
 
-    let search_title = Line::from(Span::styled(" Search ", s_hl));
+    let search_title = if app.add_input.is_some() {
+        Line::from(Span::styled(" Add ", s_hl))
+    } else {
+        Line::from(Span::styled(" Search ", s_hl))
+    };
 
     let search_block = Block::default()
         .borders(Borders::ALL)
@@ -1474,7 +1475,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Cursor position for input
     if app.add_input.is_some() {
         let add_text = app.add_input.as_ref().unwrap();
-        let cursor_x = search_inner.x + "add: ".len() as u16 + add_text.len() as u16;
+        let cursor_x = search_inner.x + add_text.len() as u16;
         f.set_cursor_position((cursor_x, search_inner.y));
     } else if app.input_mode == InputMode::Insert {
         let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
