@@ -1,6 +1,6 @@
 # Grimoire
 
-A fast, opinionated reference manager for the terminal.
+A fast reference manager for the terminal.
 
 ## Philosophy
 
