@@ -795,7 +795,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "grim"
+name = "grimoire"
 version = "0.1.0"
 dependencies = [
  "anyhow",

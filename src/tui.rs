@@ -294,7 +294,7 @@ enum InputMode {
 pub fn browse(config: &AppConfig, library: &Path, initial_query: Option<&str>) -> Result<()> {
     let app = App::new(config, library, Mode::Browse, initial_query)?;
     if app.entries.is_empty() {
-        println!("Library is empty. Use `grim add <file.pdf>` to import a paper.");
+        println!("Library is empty. Use `grimoire add <file.pdf>` to import a paper.");
         return Ok(());
     }
     run_app(app)
@@ -1036,7 +1036,7 @@ impl App {
 
         self.flash = Some(("Adding...".to_string(), std::time::Instant::now()));
 
-        let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("grim"));
+        let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("grimoire"));
         let output = std::process::Command::new(bin)
             .arg("add")
             .arg(&input)
