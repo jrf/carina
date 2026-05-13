@@ -23,6 +23,6 @@ clean:
     cargo clean
 
 install: release
-    @cp target/release/grim ~/.local/bin/grim
-    @if [ "$(uname)" = "Darwin" ]; then codesign -s - ~/.local/bin/grim; fi
-    @echo "Installed → ~/.local/bin/grim"
+    @cp target/release/grimoire ~/.local/bin/grimoire
+    @if [ "$(uname)" = "Darwin" ]; then codesign -s - ~/.local/bin/grimoire; fi
+    @echo "Installed → ~/.local/bin/grimoire"
