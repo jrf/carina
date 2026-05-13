@@ -287,8 +287,8 @@ enum Mode {
 
 #[derive(Clone, Copy, PartialEq)]
 enum InputMode {
-    Normal,
-    Insert,
+    Browse,
+    Search,
 }
 
 pub fn browse(config: &AppConfig, library: &Path, initial_query: Option<&str>) -> Result<()> {
@@ -543,9 +543,9 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
             }
 
             match app.input_mode {
-                InputMode::Insert => match (key.code, key.modifiers) {
+                InputMode::Search => match (key.code, key.modifiers) {
                     (KeyCode::Esc, _) => {
-                        app.input_mode = InputMode::Normal;
+                        app.input_mode = InputMode::Browse;
                     }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
 
@@ -570,12 +570,12 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
                     }
 
                     (KeyCode::Enter, _) => {
-                        app.input_mode = InputMode::Normal;
+                        app.input_mode = InputMode::Browse;
                     }
 
                     _ => {}
                 },
-                InputMode::Normal => match (key.code, key.modifiers) {
+                InputMode::Browse => match (key.code, key.modifiers) {
                     (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                         app.should_quit = true;
                     }
@@ -583,7 +583,7 @@ fn run_event_loop(terminal: &mut Term, app: &mut App, tty_ctl: &mut File) -> Res
 
                     (KeyCode::Char('/'), KeyModifiers::NONE)
                     | (KeyCode::Char('i'), KeyModifiers::NONE) => {
-                        app.input_mode = InputMode::Insert;
+                        app.input_mode = InputMode::Search;
                     }
 
                     (KeyCode::Char('j'), KeyModifiers::NONE)
@@ -722,7 +722,7 @@ impl App {
             },
             theme,
             mode,
-            input_mode: InputMode::Insert,
+            input_mode: InputMode::Search,
             should_quit: false,
             pending_output: None,
             tag_filter: None,
@@ -1479,7 +1479,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         let add_text = app.add_input.as_ref().unwrap();
         let cursor_x = search_inner.x + add_text.len() as u16;
         f.set_cursor_position((cursor_x, search_inner.y));
-    } else if app.input_mode == InputMode::Insert {
+    } else if app.input_mode == InputMode::Search {
         let tag_label_len = app.tag_filter.as_ref().map(|t| t.len() + 3).unwrap_or(0);
         let cursor_x = search_inner.x + tag_label_len as u16 + app.filter.len() as u16;
         f.set_cursor_position((cursor_x, search_inner.y));
@@ -1488,19 +1488,19 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Status bar as bottom title of list
     let count_str = format!(" {}/{} ", app.filtered_indices.len(), app.entries.len());
     let mode_indicator = match app.input_mode {
-        InputMode::Normal => Span::styled(
-            " NOR ",
+        InputMode::Browse => Span::styled(
+            " BRW ",
             Style::default().fg(t.status_fg).bg(t.normal_bg).add_modifier(Modifier::BOLD),
         ),
-        InputMode::Insert => Span::styled(
-            " INS ",
+        InputMode::Search => Span::styled(
+            " SRC ",
             Style::default().fg(t.status_fg).bg(t.insert_bg).add_modifier(Modifier::BOLD),
         ),
     };
     let mode_hint = match (app.input_mode, &app.mode) {
-        (InputMode::Insert, _) => " esc normal ",
-        (InputMode::Normal, Mode::Browse) => " / search  c clear  q quit ",
-        (InputMode::Normal, Mode::Cite { .. }) => " / search  c clear  q quit ",
+        (InputMode::Search, _) => " esc browse ",
+        (InputMode::Browse, Mode::Browse) => " / search  c clear  q quit ",
+        (InputMode::Browse, Mode::Cite { .. }) => " / search  c clear  q quit ",
     };
     let mut bottom_spans = vec![
         mode_indicator,
@@ -1824,13 +1824,13 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Help popup
     if app.show_help {
         let help_lines = vec![
-            ("", "Normal mode"),
+            ("", "Browse mode"),
             ("j / k", "Move down / up"),
             ("g / G", "Jump to top / bottom"),
             ("^d / ^u", "Half-page down / up"),
             ("^f / ^b", "Page down / up"),
             ("J / K", "Scroll preview down / up"),
-            ("/ or i", "Enter search (insert mode)"),
+            ("/ or i", "Enter search mode"),
             ("enter", "Open PDF"),
             ("e", "Edit info.toml"),
             ("y", "Copy BibTeX"),
@@ -1848,8 +1848,8 @@ fn draw(f: &mut Frame, app: &mut App) {
             ("T", "Switch theme"),
             ("q / esc", "Quit"),
             ("", ""),
-            ("", "Insert mode"),
-            ("esc", "Return to normal mode"),
+            ("", "Search mode"),
+            ("esc", "Return to browse mode"),
             ("^p / ^n", "Move up / down"),
             ("^d / ^u", "Half-page down / up"),
             ("^f / ^b", "Page down / up"),
