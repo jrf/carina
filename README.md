@@ -1,6 +1,8 @@
 # Grimoire
 
-A fast reference manager for the terminal.
+A fast TUI reference manager.
+
+![Grimoire](grimoire.png)
 
 ## Install
 
@@ -19,15 +21,15 @@ just install
 ## Usage
 
 ```
-grim                          # browse library
-grim jepa                     # browse with "jepa" pre-filled
-grim add 1706.03762           # import by arXiv ID (fetches metadata + PDF)
-grim add 10.1038/nature14539  # import by DOI (fetches metadata)
-grim add paper.pdf            # import local PDF
-grim cite --format typst      # pick a reference, output @cite-key
-grim reindex                  # rebuild search index from filesystem
-grim validate                 # check library integrity
-grim validate --fix           # auto-fix issues (rename temp files, remove junk)
+grimoire                          # browse library
+grimoire jepa                     # browse with "jepa" pre-filled
+grimoire add 1706.03762           # import by arXiv ID (fetches metadata + PDF)
+grimoire add 10.1038/nature14539  # import by DOI (fetches metadata)
+grimoire add paper.pdf            # import local PDF
+grimoire cite --format typst      # pick a reference, output @cite-key
+grimoire reindex                  # rebuild search index from filesystem
+grimoire validate                 # check library integrity
+grimoire validate --fix           # auto-fix issues (rename temp files, remove junk)
 ```
 
 ### TUI keybindings
@@ -36,8 +38,8 @@ grim validate --fix           # auto-fix issues (rename temp files, remove junk)
 |-----|--------|
 | `j / k` | Move down / up |
 | `g / G` | Jump to top / bottom |
-| `/ or i` | Enter search (insert mode) |
-| `enter` | Open PDF (normal), confirm search (insert) |
+| `/ or i` | Enter search mode |
+| `enter` | Open PDF (browse), confirm search (search) |
 | `e` | Edit info.toml |
 | `y` | Copy BibTeX |
 | `o` | Open DOI / arXiv in browser |
@@ -103,16 +105,16 @@ Add to `~/.config/helix/config.toml`:
 
 ```toml
 [keys.normal.space.r]
-r = [":insert-output grim cite", ":redraw"]
-t = [":insert-output grim cite --format typst", ":redraw"]
-l = [":insert-output grim cite --format latex", ":redraw"]
+r = [":insert-output grimoire cite", ":redraw"]
+t = [":insert-output grimoire cite --format typst", ":redraw"]
+l = [":insert-output grimoire cite --format latex", ":redraw"]
 ```
 
 `Space r t` in normal mode opens Grimoire and inserts a Typst citation at the cursor.
 
 ## Smart import
 
-`grim add` detects the input type automatically:
+`grimoire add` detects the input type automatically:
 
 - **arXiv ID** (`1706.03762`) — fetches metadata from arXiv API, downloads PDF
 - **arXiv URL** (`https://arxiv.org/abs/1706.03762`) — same
